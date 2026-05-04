@@ -91,10 +91,29 @@ while True:
             dist = sum([(a - b)**2 for a, b in zip(cube_pos, ee_pos)])**0.5
             
             if dist < 0.15:
-                # WYŁĄCZAMY KOLIZJE
-                p.setCollisionFilterPair(robotId, cubeId, endEffectorIndex, -1, enableCollision=0)
-                constraint_id = p.createConstraint(robotId, endEffectorIndex, cubeId, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [0, 0, 0])
-                print("--- ZŁAPANO KOSTKĘ ---")
+                # Wyłączamy kolizje z całym robotem
+                for i in range(-1, p.getNumJoints(robotId)):
+                    p.setCollisionFilterPair(robotId, cubeId, i, -1, enableCollision=0)
+                
+                # NOWE: Obliczamy dokładną pozycję kostki względem chwytaka (aby uniknąć szarpania)
+                ee_pos, ee_orn = ee_state[0], ee_state[1] # ee_state pobraliśmy kilka linijek wyżej
+                cube_pos, cube_orn = p.getBasePositionAndOrientation(cubeId)
+                
+                # Matematyka transformacji przestrzennych (z globalnych na lokalne chwytaka)
+                inv_ee_pos, inv_ee_orn = p.invertTransform(ee_pos, ee_orn)
+                local_cube_pos, local_cube_orn = p.multiplyTransforms(inv_ee_pos, inv_ee_orn, cube_pos, cube_orn)
+                
+                # Tworzymy "spaw" uwzględniający to przesunięcie
+                constraint_id = p.createConstraint(parentBodyUniqueId=robotId,
+                                                   parentLinkIndex=endEffectorIndex,
+                                                   childBodyUniqueId=cubeId,
+                                                   childLinkIndex=-1,
+                                                   jointType=p.JOINT_FIXED,
+                                                   jointAxis=[0, 0, 0],
+                                                   parentFramePosition=local_cube_pos,
+                                                   childFramePosition=[0, 0, 0],
+                                                   parentFrameOrientation=local_cube_orn)
+                print("--- ZŁAPANO KOSTKĘ BEZ NAPRĘŻEŃ ---")
             else:
                 gripper_active = False
                 print("Za daleko od kostki!")

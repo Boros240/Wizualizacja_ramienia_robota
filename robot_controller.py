@@ -80,21 +80,36 @@ class TeachAndPlayController:
                 dist = sum([(a - b)**2 for a, b in zip(cube_pos, ee_pos)])**0.5
                 
                 if dist < 0.15:
-                    # Wyłączamy kolizje między końcówką a kostką na czas chwytu (żeby nie trzęsło!)
-                    p.setCollisionFilterPair(self.robot_id, cube_id, self.end_effector_index, -1, enableCollision=0)
+                    for i in range(-1, p.getNumJoints(self.robot_id)):
+                        p.setCollisionFilterPair(self.robot_id, cube_id, i, -1, enableCollision=0)
                     
-                    constraint_id = p.createConstraint(self.robot_id, self.end_effector_index, 
-                                                       cube_id, -1, p.JOINT_FIXED, 
-                                                       [0, 0, 0], [0, 0, 0], [0, 0, 0])
-                    print("   [Kostka złapana]")
+                    # NOWE: Matematyka transformacji dla odtwarzania
+                    ee_pos, ee_orn = ee_state[0], ee_state[1]
+                    cube_pos, cube_orn = p.getBasePositionAndOrientation(cube_id)
+                    
+                    inv_ee_pos, inv_ee_orn = p.invertTransform(ee_pos, ee_orn)
+                    local_cube_pos, local_cube_orn = p.multiplyTransforms(inv_ee_pos, inv_ee_orn, cube_pos, cube_orn)
+                    
+                    constraint_id = p.createConstraint(parentBodyUniqueId=self.robot_id,
+                                                       parentLinkIndex=self.end_effector_index,
+                                                       childBodyUniqueId=cube_id,
+                                                       childLinkIndex=-1,
+                                                       jointType=p.JOINT_FIXED,
+                                                       jointAxis=[0, 0, 0],
+                                                       parentFramePosition=local_cube_pos,
+                                                       childFramePosition=[0, 0, 0],
+                                                       parentFrameOrientation=local_cube_orn)
+                    print("   [Kostka złapana poprawnie]")
+                    
             elif not gripper_active and constraint_id is not None:
                 p.removeConstraint(constraint_id)
                 constraint_id = None
                 
-                # Przywracamy kolizje, żeby kostka mogła znów leżeć na podłożu itp.
-                p.setCollisionFilterPair(self.robot_id, cube_id, self.end_effector_index, -1, enableCollision=1)
+                # PRZYWRACAMY KOLIZJE Z CAŁYM ROBOTEM
+                for i in range(-1, p.getNumJoints(self.robot_id)):
+                    p.setCollisionFilterPair(self.robot_id, cube_id, i, -1, enableCollision=1)
                 print("   [Kostka puszczona]")
-                
+
             # Mała pauza po dojechaniu i (ewentualnej) akcji chwytaka
             for _ in range(60): # 0.25 sekundy przerwy
                 p.stepSimulation()
