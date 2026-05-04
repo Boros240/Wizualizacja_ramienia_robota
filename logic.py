@@ -1,166 +1,172 @@
 import pybullet as p
 import pybullet_data
 import time
-import numpy as np # Upewnij się, że masz numpy (pip install numpy)
-
+import numpy as np
 from robot_controller import TeachAndPlayController
 
-physicsClient = p.connect(p.GUI)
-p.setAdditionalSearchPath(pybullet_data.getDataPath())
-p.setGravity(0, 0, -9.81)
-
-planeId = p.loadURDF("plane.urdf")
-cubeId = p.loadURDF("cube.urdf", [0.3, 0.0, 0.2], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=False)
-robotId = p.loadURDF("simple_arm.urdf", [0, 0, 0], p.getQuaternionFromEuler([0, 0, 0]), useFixedBase=True)
-
-endEffectorIndex = 4 
-
-controller = TeachAndPlayController(robotId, endEffectorIndex)
-
-slider_x = p.addUserDebugParameter("Cel X (Suwak)", -0.8, 0.8, 0.3)
-slider_y = p.addUserDebugParameter("Cel Y (Suwak)", -0.8, 0.8, 0.0)
-slider_z = p.addUserDebugParameter("Cel Z (Suwak)", 0.1, 1.0, 0.4)
-
-btn_save = p.addUserDebugParameter("ZAPISZ PUNKT", 1, 0, 0)
-btn_play = p.addUserDebugParameter("ODTWORZ SEKWENCJE", 1, 0, 0)
-btn_clear = p.addUserDebugParameter("WYCZYSC PAMIEC", 1, 0, 0)
-
-prev_save_clicks, prev_play_clicks, prev_clear_clicks = 0, 0, 0
-current_joint_angles = [0.0, 0.0, 0.0, 0.0]
-prev_slider_vals = [0.3, 0.0, 0.4]
-
-gripper_active = False
-constraint_id = None
-space_pressed_previously = False
-
-print("========================================")
-print("STEROWANIE GOTOWE")
-print("Zwróć uwagę na konsolę przy zapisywaniu punktów.")
-print("========================================")
-
-while True:
-    slider_vals = [
-        p.readUserDebugParameter(slider_x),
-        p.readUserDebugParameter(slider_y),
-        p.readUserDebugParameter(slider_z)
-    ]
-    
-    if abs(slider_vals[0] - prev_slider_vals[0]) > 0.001 or \
-       abs(slider_vals[1] - prev_slider_vals[1]) > 0.001 or \
-       abs(slider_vals[2] - prev_slider_vals[2]) > 0.001:
+class RobotSimulation:
+    def __init__(self):
+        self.EE_INDEX = 4
+        self.NUM_JOINTS = 4
+        self.GRAB_THRESHOLD = 0.15
         
-        ik_angles = p.calculateInverseKinematics(robotId, endEffectorIndex, slider_vals)
-        for i in range(len(current_joint_angles)):
-            if i < len(ik_angles):
-                current_joint_angles[i] = ik_angles[i]
-        prev_slider_vals = slider_vals.copy()
-
-    keys = p.getKeyboardEvents()
-    delta = 0.01 # Zmniejszyłem lekko deltę dla płynniejszego ręcznego ruchu
-
-    if p.B3G_LEFT_ARROW in keys and keys[p.B3G_LEFT_ARROW] & p.KEY_IS_DOWN:
-        current_joint_angles[0] -= delta
-    if p.B3G_RIGHT_ARROW in keys and keys[p.B3G_RIGHT_ARROW] & p.KEY_IS_DOWN:
-        current_joint_angles[0] += delta
+        self._setup_physics()
+        self._load_models()
+        self._setup_ui()
         
-    if p.B3G_UP_ARROW in keys and keys[p.B3G_UP_ARROW] & p.KEY_IS_DOWN:
-        current_joint_angles[1] -= delta
-    if p.B3G_DOWN_ARROW in keys and keys[p.B3G_DOWN_ARROW] & p.KEY_IS_DOWN:
-        current_joint_angles[1] += delta
+        self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
         
-    if ord('z') in keys and keys[ord('z')] & p.KEY_IS_DOWN:
-        current_joint_angles[2] += delta
-    if ord('x') in keys and keys[ord('x')] & p.KEY_IS_DOWN:
-        current_joint_angles[2] -= delta
-
-    if ord('c') in keys and keys[ord('c')] & p.KEY_IS_DOWN:
-        current_joint_angles[3] += delta
-    if ord('v') in keys and keys[ord('v')] & p.KEY_IS_DOWN:
-        current_joint_angles[3] -= delta
-
-    # --- OBSŁUGA CHWYTAKA W TRAKCIE RĘCZNEGO UCZENIA ---
-    space_is_down = (ord(' ') in keys and keys[ord(' ')] & p.KEY_IS_DOWN)
-    
-    if space_is_down and not space_pressed_previously:
-        gripper_active = not gripper_active
+        self.current_angles = [0.0] * self.NUM_JOINTS
+        self.prev_slider_vals = [0.3, 0.0, 0.4]
+        self.gripper_active = False
+        self.constraint_id = None
+        self.space_pressed = False
         
-        if gripper_active and constraint_id is None:
-            cube_pos, _ = p.getBasePositionAndOrientation(cubeId)
-            ee_state = p.getLinkState(robotId, endEffectorIndex)
-            ee_pos = ee_state[0]
-            dist = sum([(a - b)**2 for a, b in zip(cube_pos, ee_pos)])**0.5
+        # NOWE: Licznik pętli do optymalizacji częstotliwości nagrywania
+        self.tick_counter = 0 
+
+    def _setup_physics(self):
+        p.connect(p.GUI)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.setGravity(0, 0, -9.81)
+
+    def _load_models(self):
+        self.plane = p.loadURDF("plane.urdf")
+        self.cube = p.loadURDF("cube.urdf", [0.3, 0.0, 0.2], useFixedBase=False)
+        self.robot = p.loadURDF("simple_arm.urdf", [0, 0, 0], useFixedBase=True)
+
+    def _setup_ui(self):
+        self.sliders = {
+            'x': p.addUserDebugParameter("Ramie Cel X", -0.8, 0.8, 0.3),
+            'y': p.addUserDebugParameter("Ramie Cel Y", -0.8, 0.8, 0.0),
+            'z': p.addUserDebugParameter("Ramie Cel Z", 0.1, 1.0, 0.4),
+        }
+        self.cube_sliders = {
+            'x': p.addUserDebugParameter("Start Kostki X", -0.8, 0.8, 0.3),
+            'y': p.addUserDebugParameter("Start Kostki Y", -0.8, 0.8, 0.0),
+            'z': p.addUserDebugParameter("Start Kostki Z", 0.05, 1.0, 0.2),
+        }
+        self.buttons = {
+            'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE", 1, 0, 0),
+            'record': p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0), # ZMIENIONO PRZYCISK
+            'play': p.addUserDebugParameter(" ODTWORZ SEKWENCJE", 1, 0, 0),
+            'clear': p.addUserDebugParameter(" WYCZYSC PAMIEC", 1, 0, 0),
+        }
+        self.btn_states = {k: 0 for k in self.buttons}
+
+    def _check_button(self, btn_name: str) -> bool:
+        current_clicks = p.readUserDebugParameter(self.buttons[btn_name])
+        if current_clicks > self.btn_states[btn_name]:
+            self.btn_states[btn_name] = current_clicks
+            return True
+        return False
+
+    def handle_ik_sliders(self):
+        vals = [p.readUserDebugParameter(self.sliders[k]) for k in ['x', 'y', 'z']]
+        if any(abs(v - pv) > 0.001 for v, pv in zip(vals, self.prev_slider_vals)):
+            ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, vals)
+            self.current_angles = list(ik_angles)[:self.NUM_JOINTS]
+            self.prev_slider_vals = vals
+
+    def handle_keyboard(self):
+        keys = p.getKeyboardEvents()
+        delta = 0.01 
+        
+        key_map = {
+            p.B3G_LEFT_ARROW: (0, -delta), p.B3G_RIGHT_ARROW: (0, delta),
+            p.B3G_UP_ARROW: (1, -delta),   p.B3G_DOWN_ARROW: (1, delta),
+            ord('z'): (2, delta),          ord('x'): (2, -delta),
+            ord('c'): (3, delta),          ord('v'): (3, -delta)
+        }
+        
+        for key, (joint_idx, d) in key_map.items():
+            if key in keys and keys[key] & p.KEY_IS_DOWN:
+                self.current_angles[joint_idx] += d
+
+        space_down = ord(' ') in keys and keys[ord(' ')] & p.KEY_IS_DOWN
+        if space_down and not self.space_pressed:
+            self._toggle_gripper()
+        self.space_pressed = space_down
+
+    def _toggle_gripper(self):
+        self.gripper_active = not self.gripper_active
+        
+        if self.gripper_active and self.constraint_id is None:
+            cube_pos = p.getBasePositionAndOrientation(self.cube)[0]
+            ee_pos = p.getLinkState(self.robot, self.EE_INDEX)[0]
             
-            if dist < 0.15:
-                # Wyłączamy kolizje z całym robotem
-                for i in range(-1, p.getNumJoints(robotId)):
-                    p.setCollisionFilterPair(robotId, cubeId, i, -1, enableCollision=0)
+            if np.linalg.norm(np.array(cube_pos) - np.array(ee_pos)) < self.GRAB_THRESHOLD:
+                for i in range(-1, p.getNumJoints(self.robot)):
+                    p.setCollisionFilterPair(self.robot, self.cube, i, -1, 0)
                 
-                # NOWE: Obliczamy dokładną pozycję kostki względem chwytaka (aby uniknąć szarpania)
-                ee_pos, ee_orn = ee_state[0], ee_state[1] # ee_state pobraliśmy kilka linijek wyżej
-                cube_pos, cube_orn = p.getBasePositionAndOrientation(cubeId)
-                
-                # Matematyka transformacji przestrzennych (z globalnych na lokalne chwytaka)
+                ee_pos, ee_orn = p.getLinkState(self.robot, self.EE_INDEX)[0:2]
+                cube_pos, cube_orn = p.getBasePositionAndOrientation(self.cube)
                 inv_ee_pos, inv_ee_orn = p.invertTransform(ee_pos, ee_orn)
                 local_cube_pos, local_cube_orn = p.multiplyTransforms(inv_ee_pos, inv_ee_orn, cube_pos, cube_orn)
                 
-                # Tworzymy "spaw" uwzględniający to przesunięcie
-                constraint_id = p.createConstraint(parentBodyUniqueId=robotId,
-                                                   parentLinkIndex=endEffectorIndex,
-                                                   childBodyUniqueId=cubeId,
-                                                   childLinkIndex=-1,
-                                                   jointType=p.JOINT_FIXED,
-                                                   jointAxis=[0, 0, 0],
-                                                   parentFramePosition=local_cube_pos,
-                                                   childFramePosition=[0, 0, 0],
-                                                   parentFrameOrientation=local_cube_orn)
-                print("--- ZŁAPANO KOSTKĘ BEZ NAPRĘŻEŃ ---")
+                self.constraint_id = p.createConstraint(self.robot, self.EE_INDEX, self.cube, -1, p.JOINT_FIXED, [0, 0, 0], local_cube_pos, [0, 0, 0], local_cube_orn)
             else:
-                gripper_active = False
-                print("Za daleko od kostki!")
+                self.gripper_active = False
                 
-        elif not gripper_active and constraint_id is not None:
-            p.removeConstraint(constraint_id)
-            constraint_id = None
-            # PRZYWRACAMY KOLIZJE
-            p.setCollisionFilterPair(robotId, cubeId, endEffectorIndex, -1, enableCollision=1)
-            print("--- PUSZCZONO KOSTKĘ ---")
+        elif not self.gripper_active and self.constraint_id is not None:
+            p.removeConstraint(self.constraint_id)
+            self.constraint_id = None
+            for i in range(-1, p.getNumJoints(self.robot)):
+                p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1)
+
+    def reset_cube_position(self):
+        cx, cy, cz = [p.readUserDebugParameter(self.cube_sliders[k]) for k in ['x', 'y', 'z']]
+        p.resetBasePositionAndOrientation(self.cube, [cx, cy, cz], [0, 0, 0, 1])
+        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
+
+    def sync_state_after_play(self):
+        if self.controller.waypoints:
+            last = self.controller.waypoints[-1]
+            self.current_angles = list(last["angles"])
+            self.gripper_active = last["gripper"]
+            if not self.gripper_active and self.constraint_id is not None:
+                p.removeConstraint(self.constraint_id)
+                self.constraint_id = None
+                for i in range(-1, p.getNumJoints(self.robot)):
+                    p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1)
+
+    def run(self):
+        print("====== SYMULACJA CIĄGŁEGO NAGRYWANIA ======")
+        while True:
+            self.tick_counter += 1
             
-    space_pressed_previously = space_is_down
+            # 1. Odczyt użytkownika
+            self.handle_ik_sliders()
+            self.handle_keyboard()
 
-    save_clicks = p.readUserDebugParameter(btn_save)
-    play_clicks = p.readUserDebugParameter(btn_play)
-    clear_clicks = p.readUserDebugParameter(btn_clear)
+            # 2. Przyciski UI
+            if self._check_button('set_cube'):
+                self.reset_cube_position()
+            
+            if self._check_button('record'):
+                self.controller.toggle_recording()
+                
+            if self._check_button('play'):
+                self.reset_cube_position()
+                self.controller.play_sequence(self.cube)
+                self.sync_state_after_play()
+                
+            if self._check_button('clear'):
+                self.controller.clear_sequence()
 
-    if save_clicks > prev_save_clicks:
-        # PRZEKAZUJEMY cubeId ABY ZAPISAĆ JEJ POZYCJĘ
-        controller.save_waypoint(current_joint_angles, gripper_active, cubeId)
-        prev_save_clicks = save_clicks
+            # 3. ZAPIS CIĄGŁY W TLE
+            # Zapisujemy stan co 10 "tyknięć" (czyli 240Hz / 10 = 24 razy na sekundę)
+            if self.controller.is_recording and self.tick_counter % 10 == 0:
+                self.controller.record_frame(self.current_angles, self.gripper_active, self.cube)
 
-    if play_clicks > prev_play_clicks:
-        controller.play_sequence(cubeId)
-        
-        if controller.waypoints:
-            last_step = controller.waypoints[-1]
-            current_joint_angles = list(last_step["angles"])
-            gripper_active = last_step["gripper"]
-            if not gripper_active and constraint_id is not None:
-                p.removeConstraint(constraint_id)
-                constraint_id = None
-                p.setCollisionFilterPair(robotId, cubeId, endEffectorIndex, -1, enableCollision=1)
-        prev_play_clicks = play_clicks
+            # 4. Fizyka
+            if not self.controller.is_playing:
+                for i, angle in enumerate(self.current_angles):
+                    p.setJointMotorControl2(self.robot, i, p.POSITION_CONTROL, targetPosition=angle, force=200, maxVelocity=1.5)
 
-    if clear_clicks > prev_clear_clicks:
-        controller.clear_sequence()
-        prev_clear_clicks = clear_clicks
+            p.stepSimulation()
+            time.sleep(1./240.)
 
-    if not controller.is_playing:
-        for i in range(len(current_joint_angles)):
-            p.setJointMotorControl2(bodyIndex=robotId,
-                                    jointIndex=i,
-                                    controlMode=p.POSITION_CONTROL,
-                                    targetPosition=current_joint_angles[i],
-                                    force=200,
-                                    maxVelocity=1.5) # Ograniczenie prędkości również przy ręcznym sterowaniu
-
-    p.stepSimulation()
-    time.sleep(1./240.)
+if __name__ == "__main__":
+    app = RobotSimulation()
+    app.run()
