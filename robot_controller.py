@@ -1,17 +1,12 @@
 import pybullet as p
 import time
 import numpy as np
+import pygame
 
 
 class TeachAndPlayController:
     """
     Kontroler trybu „Ucz i Odtwarzaj" (Teach & Play).
-
-    Użycie:
-      1. toggle_recording() — włącz nagrywanie
-      2. record_frame(...)  — wywołuj co klatkę z logic.py
-      3. toggle_recording() — zatrzymaj nagrywanie
-      4. play_sequence(...)  — odtwórz zapisaną trajektorię
     """
 
     GRAB_THRESHOLD = 0.15  # dystans [m] do automatycznego chwytania przy odtwarzaniu
@@ -34,15 +29,11 @@ class TeachAndPlayController:
 
         if self.is_recording:
             self.waypoints.clear()
-            print("\n🔴 NAGRYWANIE ROZPOCZĘTE — ruszaj robotem!")
+            print("\n NAGRYWANIE ROZPOCZeTE — ruszaj robotem!")
         else:
-            print(f"\n⏹ NAGRYWANIE ZAKOŃCZONE — zapisano {len(self.waypoints)} klatek.")
+            print(f"\n NAGRYWANIE ZAKONCZONE — zapisano {len(self.waypoints)} klatek.")
 
     def record_frame(self, joint_angles: list, gripper_active: bool, cube_id: int):
-        """
-        Zapisuje pojedynczą klatkę ruchu.
-        Wywoływana automatycznie z pętli w logic.py — nie wywołuj ręcznie.
-        """
         if not self.is_recording:
             return
 
@@ -57,30 +48,34 @@ class TeachAndPlayController:
         """Czyści wszystkie zapisane waypoints i wyłącza nagrywanie."""
         self.waypoints.clear()
         self.is_recording = False
-        print("🗑 Pamięć sekwencji wyczyszczona.")
+        print(" Pamięć sekwencji wyczyszczona.")
 
     # ------------------------------------------------------------------
     # Odtwarzanie
     # ------------------------------------------------------------------
 
     def play_sequence(self, cube_id: int):
-        """
-        Odtwarza zapisaną trajektorię klatka po klatce.
-        Klatki są gęsto upakowane (≈24/s), więc nie ma potrzeby interpolacji.
-        """
         if not self.waypoints:
-            print("⚠ Brak zapisanych klatek do odtworzenia!")
+            print(" Brak zapisanych klatek do odtworzenia!")
             return
 
-        print(f"\n▶ Odtwarzam {len(self.waypoints)} klatek...")
+        print(f"\n Odtwarzam {len(self.waypoints)} klatek...")
         self.is_playing  = True
         constraint_id = None
+
+        motor_channel = None
+        if pygame.mixer.get_init():
+            try:
+                motor_sound = pygame.mixer.Sound("motor.wav")
+                motor_channel = pygame.mixer.Channel(1)
+                motor_channel.play(motor_sound, loops=-1)
+            except:
+                pass
 
         for step in self.waypoints:
             target_angles  = step["angles"]
             gripper_active = step["gripper"]
 
-            # Ustaw kąty stawów bezpośrednio
             for i, angle in enumerate(target_angles):
                 p.setJointMotorControl2(
                     self.robot_id, i,
@@ -89,19 +84,20 @@ class TeachAndPlayController:
                     force=200
                 )
 
-            # Logika chwytaka
             if gripper_active and constraint_id is None:
                 constraint_id = self._try_grab(cube_id)
             elif not gripper_active and constraint_id is not None:
                 self._release(cube_id, constraint_id)
                 constraint_id = None
 
-            # Odtwarzaj z tym samym tempem co nagranie (co 10 kroków symulacji)
             for _ in range(10):
                 p.stepSimulation()
                 time.sleep(1.0 / 240.0)
 
-        print("⏹ Odtwarzanie zakończone.")
+        if motor_channel:
+            motor_channel.stop()
+
+        print("Odtwarzanie zakonczone.")
         self.is_playing = False
 
     # ------------------------------------------------------------------
@@ -114,18 +110,12 @@ class TeachAndPlayController:
         return np.linalg.norm(np.array(cube_pos) - np.array(ee_pos)) < self.GRAB_THRESHOLD
 
     def _try_grab(self, cube_id: int) -> int | None:
-        """
-        Tworzy więź (constraint) między end-effektorem a kostką.
-        Zwraca ID więzi lub None jeśli kostka jest za daleko.
-        """
         if not self._is_close_to_cube(cube_id):
             return None
 
-        # Wyłącz kolizje robot–kostka podczas trzymania
         for i in range(-1, p.getNumJoints(self.robot_id)):
             p.setCollisionFilterPair(self.robot_id, cube_id, i, -1, 0)
 
-        # Oblicz lokalną pozycję kostki względem end-effektora
         ee_pos,   ee_orn   = p.getLinkState(self.robot_id, self.ee_idx)[0:2]
         cube_pos, cube_orn = p.getBasePositionAndOrientation(cube_id)
         inv_ee_pos, inv_ee_orn = p.invertTransform(ee_pos, ee_orn)
@@ -137,7 +127,6 @@ class TeachAndPlayController:
         )
 
     def _release(self, cube_id: int, constraint_id: int):
-        """Usuwa więź i przywraca kolizje robot–kostka."""
         p.removeConstraint(constraint_id)
         for i in range(-1, p.getNumJoints(self.robot_id)):
             p.setCollisionFilterPair(self.robot_id, cube_id, i, -1, 1)
