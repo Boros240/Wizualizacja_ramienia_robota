@@ -2,6 +2,7 @@ import pybullet as p
 import pybullet_data
 import time
 import numpy as np
+import pygame
 from robot_controller import TeachAndPlayController
 
 # ---------------------------------------------------------------------------
@@ -22,16 +23,18 @@ JOINT_LIMITS_RAD = [(np.deg2rad(lo), np.deg2rad(hi)) for lo, hi in JOINT_LIMITS_
 class RobotSimulation:
     EE_INDEX      = 4   # indeks ogniwa end-effektora w URDF
     NUM_JOINTS    = 4   # liczba sterowanych stawów
-    GRAB_THRESHOLD = 0.15  # maksymalny dystans [m] do chwytania kostki
+    GRAB_THRESHOLD = 0.25  # maksymalny dystans [m] do chwytania kostki
 
     def __init__(self):
         self._setup_physics()
         self._load_models()
         self._setup_ui()
+        self._setup_audio()
 
         self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
 
         self.current_angles   = [0.0] * self.NUM_JOINTS
+        self.prev_angles      = [0.0] * self.NUM_JOINTS
         self.prev_slider_vals = [0.3, 0.0, 0.4]
         self.gripper_active   = False
         self.constraint_id    = None
@@ -64,15 +67,24 @@ class RobotSimulation:
             'z': p.addUserDebugParameter("Start Kostki Z",  0.05, 1.0, 0.2),
         }
         self.buttons = {
-            'set_cube': p.addUserDebugParameter("USTAW KOSTKĘ NA STARCIE",  1, 0, 0),
+            'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
             'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
-            'play':     p.addUserDebugParameter(" ODTWÓRZ SEKWENCJĘ",     1, 0, 0),
-            'clear':    p.addUserDebugParameter(" WYCZYŚĆ PAMIĘĆ",        1, 0, 0),
+            'play':     p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
+            'clear':    p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
         }
         self.btn_states = {k: 0 for k in self.buttons}
 
+    def _setup_audio(self):
+        pygame.mixer.init()
+        try:
+            self.motor_sound = pygame.mixer.Sound("motor.wav")
+            self.motor_channel = pygame.mixer.Channel(0)
+        except FileNotFoundError:
+            print(" UWAGA: Brak pliku 'motor.wav'. Dźwięk nie będzie odtwarzany.")
+            self.motor_sound = None
+
     # ------------------------------------------------------------------
-    # Obsługa wejść użytkownika
+    # Obsługa wejść użytkownika i Audio
     # ------------------------------------------------------------------
 
     def _check_button(self, btn_name: str) -> bool:
@@ -84,13 +96,7 @@ class RobotSimulation:
         return False
 
     def _clamp_angles(self):
-        """
-        Przycina current_angles do limitów zdefiniowanych w JOINT_LIMITS_RAD.
-
-        BEZ tego kąty mogłyby akumulować się poza fizycznymi limitami URDF:
-        robot stoi w miejscu, ale zmienna rośnie → żeby robot ruszył w drugą
-        stronę, trzeba najpierw „odwinąć" tę nadwyżkę. Efekt: pozorna blokada.
-        """
+        """Przycina current_angles do limitów zdefiniowanych w JOINT_LIMITS_RAD."""
         for i, (lo, hi) in enumerate(JOINT_LIMITS_RAD):
             self.current_angles[i] = float(np.clip(self.current_angles[i], lo, hi))
 
@@ -101,17 +107,10 @@ class RobotSimulation:
             ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, vals)
             self.current_angles   = list(ik_angles)[:self.NUM_JOINTS]
             self.prev_slider_vals = vals
-            self._clamp_angles()  # IK może zwrócić kąt spoza limitu
+            self._clamp_angles()
 
     def handle_keyboard(self):
-        """
-        Sterowanie klawiaturą:
-            : obrót bazy    (joint 0)
-            : pierwsze ramię (joint 1)
-          Z / X : drugie ramię  (joint 2)
-          C / V : przegub       (joint 3)
-          SPACJA: chwytak (toggle)
-        """
+        """Sterowanie klawiaturą."""
         keys  = p.getKeyboardEvents()
         delta = 0.01  # krok kąta na klatkę [rad]
 
@@ -130,7 +129,6 @@ class RobotSimulation:
             if key in keys and keys[key] & p.KEY_IS_DOWN:
                 self.current_angles[joint_idx] += d
 
-        # Przycinamy po wszystkich naciśnięciach — to naprawia "blokadę" ruchu
         self._clamp_angles()
 
         # Toggle chwytaka na pierwsze wciśnięcie spacji
@@ -138,6 +136,26 @@ class RobotSimulation:
         if space_down and not self.space_pressed:
             self._toggle_gripper()
         self.space_pressed = space_down
+
+    def _update_audio(self):
+        if not self.motor_sound:
+            return
+
+        # Check if any joint is actually moving in the simulation (not just input change)
+        is_moving = False
+        for i in range(self.NUM_JOINTS):
+            joint_state = p.getJointState(self.robot, i)
+            joint_velocity = joint_state[1]  # Linear or angular velocity
+            if abs(joint_velocity) > 0.01:  # Threshold for detectible motion
+                is_moving = True
+                break
+
+        if is_moving:
+            if not self.motor_channel.get_busy():
+                self.motor_channel.play(self.motor_sound, loops=-1)
+        else:
+            if self.motor_channel.get_busy():
+                self.motor_channel.stop()
 
     # ------------------------------------------------------------------
     # Logika chwytaka
@@ -152,19 +170,16 @@ class RobotSimulation:
             self._release()
 
     def _try_grab(self):
-        """Próbuje przypiąć kostkę do end-effektora jeśli jest wystarczająco blisko."""
         cube_pos = p.getBasePositionAndOrientation(self.cube)[0]
         ee_pos   = p.getLinkState(self.robot, self.EE_INDEX)[0]
 
         if np.linalg.norm(np.array(cube_pos) - np.array(ee_pos)) >= self.GRAB_THRESHOLD:
-            self.gripper_active = False  # za daleko — anuluj
+            self.gripper_active = False
             return
 
-        # Wyłącz kolizje robot–kostka podczas trzymania
         for i in range(-1, p.getNumJoints(self.robot)):
             p.setCollisionFilterPair(self.robot, self.cube, i, -1, 0)
 
-        # Oblicz pozycję kostki w układzie end-effektora
         ee_pos,   ee_orn   = p.getLinkState(self.robot, self.EE_INDEX)[0:2]
         cube_pos, cube_orn = p.getBasePositionAndOrientation(self.cube)
         inv_ee_pos, inv_ee_orn = p.invertTransform(ee_pos, ee_orn)
@@ -176,7 +191,6 @@ class RobotSimulation:
         )
 
     def _release(self):
-        """Odpina kostkę i przywraca kolizje."""
         p.removeConstraint(self.constraint_id)
         self.constraint_id = None
         for i in range(-1, p.getNumJoints(self.robot)):
@@ -187,13 +201,11 @@ class RobotSimulation:
     # ------------------------------------------------------------------
 
     def reset_cube_position(self):
-        """Resetuje pozycję kostki do wartości z suwaków."""
         cx, cy, cz = [p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')]
         p.resetBasePositionAndOrientation(self.cube, [cx, cy, cz], [0, 0, 0, 1])
         p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
 
     def sync_state_after_play(self):
-        """Po odtworzeniu synchronizuje stan kontrolera z ostatnim waypointem."""
         if not self.controller.waypoints:
             return
         last = self.controller.waypoints[-1]
@@ -201,6 +213,9 @@ class RobotSimulation:
         self.gripper_active  = last["gripper"]
         if not self.gripper_active and self.constraint_id is not None:
             self._release()
+        
+        # Zapobiega "czknięciu" audio po synchronizacji
+        self.prev_angles = list(self.current_angles)
 
     # ------------------------------------------------------------------
     # Główna pętla
@@ -217,6 +232,10 @@ class RobotSimulation:
             self.handle_ik_sliders()
             self.handle_keyboard()
 
+            # Aktualizacja dźwięku podczas sterowania ręcznego
+            if not self.controller.is_playing:
+                self._update_audio()
+
             # 2. Przyciski UI
             if self._check_button('set_cube'):
                 self.reset_cube_position()
@@ -232,11 +251,11 @@ class RobotSimulation:
             if self._check_button('clear'):
                 self.controller.clear_sequence()
 
-            # 3. Ciągłe nagrywanie w tle (co 10 kroków ≈ 24 klatki/s)
+            # 3. Ciągłe nagrywanie w tle
             if self.controller.is_recording and self.tick_counter % 10 == 0:
                 self.controller.record_frame(self.current_angles, self.gripper_active, self.cube)
 
-            # 4. Fizyka — steruj silnikami tylko gdy nie odtwarzamy
+            # 4. Fizyka
             if not self.controller.is_playing:
                 for i, angle in enumerate(self.current_angles):
                     p.setJointMotorControl2(
