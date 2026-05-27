@@ -1,139 +1,361 @@
 <?xml version="1.0"?>
 <robot name="proste_ramie">
 
-  <material name="niebieski">
-    <color rgba="0 0 0.8 1"/>
-  </material>
-  <material name="szary">
-    <color rgba="0.7 0.7 0.7 1"/>
+  <!-- ═══════════════════════════════════════════════════
+       MATERIAŁY / KOLORY
+  ═══════════════════════════════════════════════════ -->
+
+  <!-- Stalowo-srebrny korpus -->
+  <material name="steel">
+    <color rgba="0.75 0.78 0.82 1.0"/>
   </material>
 
+  <!-- Ciemnografitowe ramiona -->
+  <material name="dark_metal">
+    <color rgba="0.22 0.24 0.28 1.0"/>
+  </material>
+
+  <!-- Pomarańczowe akcenty (stawy, końcówka) -->
+  <material name="accent_orange">
+    <color rgba="0.95 0.45 0.05 1.0"/>
+  </material>
+
+  <!-- Żółto-zielony chwytak -->
+  <material name="gripper_color">
+    <color rgba="0.20 0.75 0.30 1.0"/>
+  </material>
+
+  <!-- Czarny pasek dekoracyjny -->
+  <material name="black">
+    <color rgba="0.10 0.10 0.12 1.0"/>
+  </material>
+
+  <!-- Jasny szary dla kul stawowych -->
+  <material name="joint_ball">
+    <color rgba="0.85 0.45 0.10 1.0"/>
+  </material>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       BAZA  (gruby walec + kula przejściowa)
+  ═══════════════════════════════════════════════════ -->
+
   <link name="base_link">
+    <!-- główna tarcza -->
     <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.1" radius="0.2"/>
+        <cylinder length="0.16" radius="0.36"/>
       </geometry>
-      <material name="szary"/>
+      <material name="steel"/>
     </visual>
-    <collision>
+    <!-- pierścień ozdobny (węższy, wyżej) -->
+    <visual>
+      <origin xyz="0 0 0.11" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.1" radius="0.2"/>
+        <cylinder length="0.06" radius="0.24"/>
+      </geometry>
+      <material name="accent_orange"/>
+    </visual>
+    <!-- kula przejścia do link1 -->
+    <visual>
+      <origin xyz="0 0 0.14" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.14"/>
+      </geometry>
+      <material name="joint_ball"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.16" radius="0.36"/>
       </geometry>
     </collision>
     <inertial>
-      <mass value="10"/>
-      <inertia ixx="0.1" ixy="0.0" ixz="0.0" iyy="0.1" iyz="0.0" izz="0.1"/>
+      <mass value="80"/>
+      <inertia ixx="4.8" ixy="0" ixz="0" iyy="4.8" iyz="0" izz="6.4"/>
     </inertial>
   </link>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       JOINT 1 – obrót wokół Z (baza → link1)
+  ═══════════════════════════════════════════════════ -->
 
   <joint name="joint1" type="revolute">
     <parent link="base_link"/>
-    <child link="link1"/>
-    <origin xyz="0 0 0.05" rpy="0 0 0"/> <axis xyz="0 0 1"/> <limit lower="-2.618" upper="2.618" effort="100" velocity="1"/>
+    <child  link="link1"/>
+    <origin xyz="0 0 0.14" rpy="0 0 0"/>
+    <axis   xyz="0 0 2"/>
+    <limit  lower="-2.618" upper="2.618" effort="300" velocity="1.2"/>
+    <dynamics damping="8" friction="1.6"/>
   </joint>
 
+
+  <!-- ═══════════════════════════════════════════════════
+       LINK 1 – pierwsze (najdłuższe) ramię
+  ═══════════════════════════════════════════════════ -->
+
   <link name="link1">
+    <!-- główny trzon -->
     <visual>
-      <origin xyz="0 0 0.2" rpy="0 0 0"/> <geometry>
-        <cylinder length="0.4" radius="0.05"/>
-      </geometry>
-      <material name="niebieski"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0.2" rpy="0 0 0"/>
+      <origin xyz="0 0 0.4" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.4" radius="0.05"/>
+        <cylinder length="0.76" radius="0.09"/>
+      </geometry>
+      <material name="dark_metal"/>
+    </visual>
+    <!-- ozdobny środkowy pierścień -->
+    <visual>
+      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.08" radius="0.11"/>
+      </geometry>
+      <material name="accent_orange"/>
+    </visual>
+    <!-- kula u góry (przejście do joint2) -->
+    <visual>
+      <origin xyz="0 0 0.78" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.11"/>
+      </geometry>
+      <material name="joint_ball"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.76" radius="0.09"/>
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 0.2" rpy="0 0 0"/>
-      <mass value="2"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <mass value="16"/>
+      <inertia ixx="0.96" ixy="0" ixz="0" iyy="0.96" iyz="0" izz="0.128"/>
     </inertial>
   </link>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       JOINT 2 – zgięcie wokół Y
+  ═══════════════════════════════════════════════════ -->
 
   <joint name="joint2" type="revolute">
     <parent link="link1"/>
-    <child link="link2"/>
-    <origin xyz="0 0 0.4" rpy="0 0 0"/> <axis xyz="0 1 0"/> <limit lower="-1.57" upper="1.57" effort="100" velocity="1"/>
+    <child  link="link2"/>
+    <origin xyz="0 0 0.78" rpy="0 0 0"/>
+    <axis   xyz="0 2 0"/>
+    <limit  lower="-1.57" upper="1.57" effort="240" velocity="1.2"/>
+    <dynamics damping="6.4" friction="1.6"/>
   </joint>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       LINK 2 – środkowe ramię
+  ═══════════════════════════════════════════════════ -->
 
   <link name="link2">
     <visual>
-      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <origin xyz="0 0 0.28" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.3" radius="0.04"/>
+        <cylinder length="0.52" radius="0.072"/>
       </geometry>
-      <material name="szary"/>
+      <material name="steel"/>
     </visual>
-    <collision>
-      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <!-- ozdobny pierścień -->
+    <visual>
+      <origin xyz="0 0 0.28" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.3" radius="0.04"/>
+        <cylinder length="0.06" radius="0.092"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <!-- kula u góry -->
+    <visual>
+      <origin xyz="0 0 0.54" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.088"/>
+      </geometry>
+      <material name="joint_ball"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.28" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.52" radius="0.072"/>
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 0.15" rpy="0 0 0"/>
-      <mass value="1.5"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <origin xyz="0 0 0.28" rpy="0 0 0"/>
+      <mass value="9.6"/>
+      <inertia ixx="0.32" ixy="0" ixz="0" iyy="0.32" iyz="0" izz="0.064"/>
     </inertial>
   </link>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       JOINT 3 – zgięcie wokół Y
+  ═══════════════════════════════════════════════════ -->
 
   <joint name="joint3" type="revolute">
     <parent link="link2"/>
-    <child link="link3"/>
-    <origin xyz="0 0 0.3" rpy="0 0 0"/>
-    <axis xyz="0 1 0"/>
-    <limit lower="-1.57" upper="1.57" effort="100" velocity="1"/>
+    <child  link="link3"/>
+    <origin xyz="0 0 0.54" rpy="0 0 0"/>
+    <axis   xyz="0 2 0"/>
+    <limit  lower="-1.57" upper="1.57" effort="160" velocity="1.5"/>
+    <dynamics damping="4.8" friction="1.28"/>
   </joint>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       LINK 3 – krótkie ramię przed przegubem
+  ═══════════════════════════════════════════════════ -->
 
   <link name="link3">
     <visual>
-      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <origin xyz="0 0 0.18" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.2" radius="0.03"/>
+        <cylinder length="0.32" radius="0.056"/>
       </geometry>
-      <material name="niebieski"/>
+      <material name="dark_metal"/>
     </visual>
-    <collision>
-      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <!-- kula u góry -->
+    <visual>
+      <origin xyz="0 0 0.34" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.2" radius="0.03"/>
+        <sphere radius="0.072"/>
+      </geometry>
+      <material name="joint_ball"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.18" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.32" radius="0.056"/>
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 0.1" rpy="0 0 0"/>
-      <mass value="0.5"/>
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+      <origin xyz="0 0 0.18" rpy="0 0 0"/>
+      <mass value="4.8"/>
+      <inertia ixx="0.16" ixy="0" ixz="0" iyy="0.16" iyz="0" izz="0.032"/>
     </inertial>
   </link>
 
+
+  <!-- ═══════════════════════════════════════════════════
+       JOINT WRIST – przegub nadgarstka
+  ═══════════════════════════════════════════════════ -->
+
   <joint name="joint_wrist" type="revolute">
     <parent link="link3"/>
-    <child link="wrist_link"/>
-    <origin xyz="0 0 0.2" rpy="0 0 0"/> <axis xyz="0 1 0"/> <limit lower="-1.57" upper="1.57" effort="100" velocity="1"/>
+    <child  link="wrist_link"/>
+    <origin xyz="0 0 0.34" rpy="0 0 0"/>
+    <axis   xyz="0 2 0"/>
+    <limit  lower="-1.57" upper="1.57" effort="100" velocity="2.0"/>
+    <dynamics damping="3.2" friction="0.8"/>
   </joint>
 
+
+  <!-- ═══════════════════════════════════════════════════
+       WRIST LINK – walec nadgarstka
+  ═══════════════════════════════════════════════════ -->
+
   <link name="wrist_link">
+    <!-- walec -->
     <visual>
-      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <origin xyz="0 0 0.08" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.1" radius="0.02"/>
+        <cylinder length="0.14" radius="0.044"/>
       </geometry>
-      </visual>
-    </link>
+      <material name="steel"/>
+    </visual>
+    <!-- pomarańczowa końcówka / palma chwytaka -->
+    <visual>
+      <origin xyz="0 0 0.16" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.12 0.036"/>
+      </geometry>
+      <material name="accent_orange"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.08" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.14" radius="0.044"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.08" rpy="0 0 0"/>
+      <mass value="2"/>
+      <inertia ixx="0.032" ixy="0" ixz="0" iyy="0.032" iyz="0" izz="0.032"/>
+    </inertial>
+  </link>
+
+
+  <!-- ═══════════════════════════════════════════════════
+       JOINT stały wrist → gripper
+  ═══════════════════════════════════════════════════ -->
 
   <joint name="joint_gripper_fix" type="fixed">
     <parent link="wrist_link"/>
-    <child link="gripper_link"/>
-    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <child  link="gripper_link"/>
+    <origin xyz="0 0 0.18" rpy="0 0 0"/>
   </joint>
-  
+
+
+  <!-- ═══════════════════════════════════════════════════
+       GRIPPER LINK – palma + dwa palce (szczęki)
+  ═══════════════════════════════════════════════════ -->
+
   <link name="gripper_link">
+
+    <!-- Lewy palec -->
     <visual>
+      <origin xyz="-0.07 0 0.06" rpy="0 0 0"/>
       <geometry>
-        <box size="0.1 0.01 0.05"/> </geometry>
-      </visual>
-    </link>
+        <box size="0.032 0.036 0.12"/>
+      </geometry>
+      <material name="gripper_color"/>
+    </visual>
+    <!-- Lewy szpic palca (ścięty) -->
+    <visual>
+      <origin xyz="-0.07 0 0.13" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.028 0.02"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+
+    <!-- Prawy palec -->
+    <visual>
+      <origin xyz="0.07 0 0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.032 0.036 0.12"/>
+      </geometry>
+      <material name="gripper_color"/>
+    </visual>
+    <!-- Prawy szpic palca -->
+    <visual>
+      <origin xyz="0.07 0 0.13" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.028 0.02"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+
+    <!-- Kolizja uproszczona — jedna duża skrzynka obejmująca oba palce -->
+    <collision>
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.044 0.14"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+      <mass value="1.2"/>
+      <inertia ixx="0.032" ixy="0" ixz="0" iyy="0.032" iyz="0" izz="0.032"/>
+    </inertial>
+  </link>
 
 </robot>
