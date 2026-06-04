@@ -32,6 +32,8 @@ class RobotSimulation:
         self._setup_audio()
 
         self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
+        self.ab_points = {'A': None, 'B': None}
+        self.ab_markers = {'A': None, 'B': None}
 
         self.current_angles   = [0.0] * self.NUM_JOINTS
         self.prev_angles      = [0.0] * self.NUM_JOINTS
@@ -70,6 +72,11 @@ class RobotSimulation:
             'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
             'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
             'play':     p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
+            'export':   p.addUserDebugParameter(" EKSPORTUJ JSON",        1, 0, 0),
+            'import':   p.addUserDebugParameter(" IMPORTUJ JSON",         1, 0, 0),
+            'save_a':   p.addUserDebugParameter(" ZAPISZ A (KOSTKA)",     1, 0, 0),
+            'save_b':   p.addUserDebugParameter(" ZAPISZ B (CEL)",        1, 0, 0),
+            'run_ab':   p.addUserDebugParameter(" WYKONAJ A -> B",        1, 0, 0),
             'clear':    p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
         }
         self.btn_states = {k: 0 for k in self.buttons}
@@ -200,22 +207,88 @@ class RobotSimulation:
     # Narzędzia
     # ------------------------------------------------------------------
 
-    def reset_cube_position(self):
-        cx, cy, cz = [p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')]
-        p.resetBasePositionAndOrientation(self.cube, [cx, cy, cz], [0, 0, 0, 1])
+    def _current_target_position(self):
+        return [p.readUserDebugParameter(self.sliders[k]) for k in ('x', 'y', 'z')]
+
+    def set_cube_position(self, pos):
+        if self.constraint_id is not None:
+            self._release()
+        self.gripper_active = False
+        p.resetBasePositionAndOrientation(self.cube, pos, [0, 0, 0, 1])
         p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
 
-    def sync_state_after_play(self):
+    def reset_cube_position(self):
+        self.set_cube_position([p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')])
+
+    def prepare_cube_for_playback(self):
+        if self.controller.waypoints:
+            self.set_cube_position(self.controller.waypoints[0]["cube_pos"])
+        else:
+            self.reset_cube_position()
+
+    def sync_state_after_play(self, playback_constraint=None):
         if not self.controller.waypoints:
             return
         last = self.controller.waypoints[-1]
         self.current_angles = list(last["angles"])
         self.gripper_active  = last["gripper"]
-        if not self.gripper_active and self.constraint_id is not None:
+        if playback_constraint is not None:
+            self.constraint_id = playback_constraint
+        elif not self.gripper_active and self.constraint_id is not None:
             self._release()
         
         # Zapobiega "czknięciu" audio po synchronizacji
         self.prev_angles = list(self.current_angles)
+
+    def export_sequence(self):
+        try:
+            self.controller.export_sequence()
+        except OSError as exc:
+            print(f" Nie udalo sie wyeksportowac JSON: {exc}")
+
+    def import_sequence(self):
+        try:
+            count = self.controller.import_sequence()
+        except (OSError, ValueError) as exc:
+            print(f" Nie udalo sie zaimportowac JSON: {exc}")
+            return
+
+        if count:
+            self.prepare_cube_for_playback()
+
+    def save_ab_point(self, name):
+        if name == 'A':
+            pos = list(p.getBasePositionAndOrientation(self.cube)[0])
+        else:
+            pos = self._current_target_position()
+
+        self.ab_points[name] = pos
+        self._show_ab_marker(name, pos)
+        print(f" Zapisano punkt {name}: {[round(v, 3) for v in pos]}")
+
+    def _show_ab_marker(self, name, pos):
+        if self.ab_markers[name] is not None:
+            p.removeBody(self.ab_markers[name])
+
+        color = [0.1, 0.9, 0.1, 0.75] if name == 'A' else [0.95, 0.25, 0.1, 0.75]
+        shape = p.createVisualShape(p.GEOM_SPHERE, radius=0.045, rgbaColor=color)
+        self.ab_markers[name] = p.createMultiBody(baseMass=0, baseVisualShapeIndex=shape, basePosition=pos)
+
+    def run_ab_program(self):
+        try:
+            self.controller.build_pick_and_place_sequence(
+                self.ab_points['A'],
+                self.ab_points['B'],
+                self.NUM_JOINTS,
+                JOINT_LIMITS_RAD,
+            )
+        except ValueError as exc:
+            print(f" Nie mozna wykonac programu A -> B: {exc}")
+            return
+
+        self.set_cube_position(self.ab_points['A'])
+        playback_constraint = self.controller.play_sequence(self.cube)
+        self.sync_state_after_play(playback_constraint)
 
     # ------------------------------------------------------------------
     # Główna pętla
@@ -224,6 +297,8 @@ class RobotSimulation:
     def run(self):
         print("====== SYMULACJA ROBOTA — TRYB NAGRYWANIA ======")
         print("Klawiatura:  baza |  ramię1 | Z/X ramię2 | C/V przegub | SPACJA chwytak")
+        print("JSON: EKSPORTUJ JSON / IMPORTUJ JSON używają pliku teach_play_sequence.json")
+        print("A -> B: ustaw kostkę i zapisz A, ustaw cel suwakami i zapisz B, potem WYKONAJ A -> B")
 
         while True:
             self.tick_counter += 1
@@ -244,9 +319,24 @@ class RobotSimulation:
                 self.controller.toggle_recording()
 
             if self._check_button('play'):
-                self.reset_cube_position()
-                self.controller.play_sequence(self.cube)
-                self.sync_state_after_play()
+                self.prepare_cube_for_playback()
+                playback_constraint = self.controller.play_sequence(self.cube)
+                self.sync_state_after_play(playback_constraint)
+
+            if self._check_button('export'):
+                self.export_sequence()
+
+            if self._check_button('import'):
+                self.import_sequence()
+
+            if self._check_button('save_a'):
+                self.save_ab_point('A')
+
+            if self._check_button('save_b'):
+                self.save_ab_point('B')
+
+            if self._check_button('run_ab'):
+                self.run_ab_program()
 
             if self._check_button('clear'):
                 self.controller.clear_sequence()

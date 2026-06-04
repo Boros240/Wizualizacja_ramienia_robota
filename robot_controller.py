@@ -1,6 +1,9 @@
-import pybullet as p
+import json
 import time
+from pathlib import Path
+
 import numpy as np
+import pybullet as p
 import pygame
 
 
@@ -10,6 +13,8 @@ class TeachAndPlayController:
     """
 
     GRAB_THRESHOLD = 0.15  # dystans [m] do automatycznego chwytania przy odtwarzaniu
+    DEFAULT_SEQUENCE_FILE = "teach_play_sequence.json"
+    JSON_VERSION = 1
 
     def __init__(self, robot_id: int, end_effector_index: int):
         self.robot_id = robot_id
@@ -51,13 +56,166 @@ class TeachAndPlayController:
         print(" Pamięć sekwencji wyczyszczona.")
 
     # ------------------------------------------------------------------
+    # Import / eksport
+    # ------------------------------------------------------------------
+
+    def export_sequence(self, file_path: str | Path = DEFAULT_SEQUENCE_FILE) -> Path:
+        """Zapisuje aktualny program Teach & Play do pliku JSON."""
+        path = Path(file_path)
+        data = {
+            "version": self.JSON_VERSION,
+            "format": "teach_and_play_sequence",
+            "waypoint_count": len(self.waypoints),
+            "waypoints": self.waypoints,
+        }
+
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        print(f" Wyeksportowano {len(self.waypoints)} klatek do pliku: {path}")
+        return path
+
+    def import_sequence(self, file_path: str | Path = DEFAULT_SEQUENCE_FILE) -> int:
+        """Wczytuje program Teach & Play z pliku JSON."""
+        path = Path(file_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+
+        raw_waypoints = data.get("waypoints") if isinstance(data, dict) else data
+        if not isinstance(raw_waypoints, list):
+            raise ValueError("Plik JSON nie zawiera listy 'waypoints'.")
+
+        waypoints = [self._validate_waypoint(step, index) for index, step in enumerate(raw_waypoints, start=1)]
+        self.waypoints = waypoints
+        self.is_recording = False
+        print(f" Zaimportowano {len(self.waypoints)} klatek z pliku: {path}")
+        return len(self.waypoints)
+
+    @staticmethod
+    def _validate_waypoint(step: dict, index: int) -> dict:
+        if not isinstance(step, dict):
+            raise ValueError(f"Klatka #{index} nie jest obiektem JSON.")
+
+        try:
+            angles = [float(value) for value in step["angles"]]
+            cube_pos = [float(value) for value in step.get("cube_pos", [0.3, 0.0, 0.2])]
+            gripper = bool(step["gripper"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Klatka #{index} ma niepoprawny format.") from exc
+
+        if not angles:
+            raise ValueError(f"Klatka #{index} nie zawiera kątów stawów.")
+        if len(cube_pos) != 3:
+            raise ValueError(f"Klatka #{index} musi mieć cube_pos jako [x, y, z].")
+
+        return {
+            "angles": angles,
+            "gripper": gripper,
+            "cube_pos": cube_pos,
+        }
+
+    # ------------------------------------------------------------------
+    # Program A -> B
+    # ------------------------------------------------------------------
+
+    def build_pick_and_place_sequence(
+        self,
+        point_a: list[float],
+        point_b: list[float],
+        num_joints: int,
+        joint_limits: list[tuple[float, float]] | None = None,
+        approach_height: float = 0.25,
+        samples_per_segment: int = 20,
+    ) -> int:
+        """
+        Generuje program: dojazd do A, chwyt, przeniesienie do B i puszczenie.
+        Punkty A/B oznaczają pozycje środka kostki.
+        """
+        point_a = self._validate_point(point_a, "A")
+        point_b = self._validate_point(point_b, "B")
+
+        above_a = [point_a[0], point_a[1], point_a[2] + approach_height]
+        above_b = [point_b[0], point_b[1], point_b[2] + approach_height]
+
+        program: list[dict] = []
+        self._append_motion_segment(program, above_a, point_a, False, point_a, num_joints, joint_limits, samples_per_segment)
+        self._append_hold_frames(program, point_a, True, point_a, num_joints, joint_limits, frames=12)
+        self._append_motion_segment(program, point_a, above_a, True, point_a, num_joints, joint_limits, samples_per_segment)
+        self._append_motion_segment(program, above_a, above_b, True, point_a, num_joints, joint_limits, samples_per_segment)
+        self._append_motion_segment(program, above_b, point_b, True, point_b, num_joints, joint_limits, samples_per_segment)
+        self._append_hold_frames(program, point_b, False, point_b, num_joints, joint_limits, frames=12)
+        self._append_motion_segment(program, point_b, above_b, False, point_b, num_joints, joint_limits, samples_per_segment)
+
+        self.waypoints = program
+        self.is_recording = False
+        print(f" Wygenerowano program A -> B ({len(self.waypoints)} klatek).")
+        return len(self.waypoints)
+
+    @staticmethod
+    def _validate_point(point: list[float], name: str) -> list[float]:
+        if point is None:
+            raise ValueError(f"Punkt {name} nie został ustawiony.")
+        if len(point) != 3:
+            raise ValueError(f"Punkt {name} musi mieć format [x, y, z].")
+        return [float(value) for value in point]
+
+    def _append_motion_segment(
+        self,
+        program: list[dict],
+        start: list[float],
+        end: list[float],
+        gripper: bool,
+        cube_pos: list[float],
+        num_joints: int,
+        joint_limits: list[tuple[float, float]] | None,
+        samples: int,
+    ):
+        for step in range(samples):
+            alpha = step / max(samples - 1, 1)
+            pos = self._interpolate_point(start, end, alpha)
+            program.append(self._make_waypoint(pos, gripper, cube_pos, num_joints, joint_limits))
+
+    def _append_hold_frames(
+        self,
+        program: list[dict],
+        pos: list[float],
+        gripper: bool,
+        cube_pos: list[float],
+        num_joints: int,
+        joint_limits: list[tuple[float, float]] | None,
+        frames: int,
+    ):
+        waypoint = self._make_waypoint(pos, gripper, cube_pos, num_joints, joint_limits)
+        for _ in range(frames):
+            program.append(dict(waypoint))
+
+    @staticmethod
+    def _interpolate_point(start: list[float], end: list[float], alpha: float) -> list[float]:
+        return [s + (e - s) * alpha for s, e in zip(start, end)]
+
+    def _make_waypoint(
+        self,
+        pos: list[float],
+        gripper: bool,
+        cube_pos: list[float],
+        num_joints: int,
+        joint_limits: list[tuple[float, float]] | None,
+    ) -> dict:
+        angles = list(p.calculateInverseKinematics(self.robot_id, self.ee_idx, pos))[:num_joints]
+        if joint_limits:
+            angles = [float(np.clip(angle, low, high)) for angle, (low, high) in zip(angles, joint_limits)]
+
+        return {
+            "angles": angles,
+            "gripper": gripper,
+            "cube_pos": list(cube_pos),
+        }
+
+    # ------------------------------------------------------------------
     # Odtwarzanie
     # ------------------------------------------------------------------
 
-    def play_sequence(self, cube_id: int):
+    def play_sequence(self, cube_id: int) -> int | None:
         if not self.waypoints:
             print(" Brak zapisanych klatek do odtworzenia!")
-            return
+            return None
 
         print(f"\n Odtwarzam {len(self.waypoints)} klatek...")
         self.is_playing  = True
@@ -99,6 +257,7 @@ class TeachAndPlayController:
 
         print("Odtwarzanie zakonczone.")
         self.is_playing = False
+        return constraint_id
 
     # ------------------------------------------------------------------
     # Prywatne — chwytak
