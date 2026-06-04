@@ -3,7 +3,7 @@ import pybullet_data
 import time
 import numpy as np
 import pygame
-from robot_controller import TeachAndPlayController
+from robot_controller import TeachAndPlayController, PickAndPlaceController
 
 # ---------------------------------------------------------------------------
 # Limity stawów w stopniach — spójne z wartościami w pliku simple_arm.urdf.
@@ -32,6 +32,11 @@ class RobotSimulation:
         self._setup_audio()
 
         self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
+        self.pick_and_place = PickAndPlaceController(
+            move_fn=self.move_ee_to,
+            grab_fn=self._auto_grab,
+            release_fn=self._auto_release,
+        )
 
         self.current_angles   = [0.0] * self.NUM_JOINTS
         self.prev_angles      = [0.0] * self.NUM_JOINTS
@@ -61,16 +66,26 @@ class RobotSimulation:
             'y': p.addUserDebugParameter("Ramię Cel Y", -0.8, 0.8, 0.0),
             'z': p.addUserDebugParameter("Ramię Cel Z",  0.1, 1.0, 0.4),
         }
+        # Punkt A = pozycja startowa kostki (punkt pobrania).
         self.cube_sliders = {
-            'x': p.addUserDebugParameter("Start Kostki X", -0.8, 0.8, 0.3),
-            'y': p.addUserDebugParameter("Start Kostki Y", -0.8, 0.8, 0.0),
-            'z': p.addUserDebugParameter("Start Kostki Z",  0.05, 1.0, 0.2),
+            'x': p.addUserDebugParameter("Punkt A (Kostka) X", -0.8, 0.8, 0.3),
+            'y': p.addUserDebugParameter("Punkt A (Kostka) Y", -0.8, 0.8, 0.0),
+            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.05, 1.0, 0.2),
+        }
+        # Punkt B = miejsce, w którym kostka ma zostać odłożona.
+        self.point_b_sliders = {
+            'x': p.addUserDebugParameter("Punkt B (Cel)  X", -0.8, 0.8, -0.3),
+            'y': p.addUserDebugParameter("Punkt B (Cel)  Y", -0.8, 0.8,  0.3),
+            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.05, 1.0,  0.2),
         }
         self.buttons = {
-            'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
-            'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
-            'play':     p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
-            'clear':    p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
+            'set_cube':   p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
+            'record':     p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
+            'play':       p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
+            'clear':      p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
+            'save_json':  p.addUserDebugParameter(" ZAPISZ DO JSON",        1, 0, 0),
+            'load_json':  p.addUserDebugParameter(" WCZYTAJ Z JSON",        1, 0, 0),
+            'pick_place': p.addUserDebugParameter(" WYKONAJ A->B (PICK&PLACE)", 1, 0, 0),
         }
         self.btn_states = {k: 0 for k in self.buttons}
 
@@ -205,6 +220,65 @@ class RobotSimulation:
         p.resetBasePositionAndOrientation(self.cube, [cx, cy, cz], [0, 0, 0, 1])
         p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
 
+    def _read_point(self, sliders: dict) -> list:
+        """Odczytuje pozycję XYZ z trzech suwaków."""
+        return [p.readUserDebugParameter(sliders[k]) for k in ('x', 'y', 'z')]
+
+    # ------------------------------------------------------------------
+    # Ruch IK i chwytak dla trybu Pick & Place
+    # ------------------------------------------------------------------
+
+    def move_ee_to(self, target_pos, steps: int = 150):
+        """Płynnie przesuwa końcówkę robota do zadanej pozycji XYZ.
+
+        Wyznacza kąty stawów metodą kinematyki odwrotnej, a następnie
+        interpoluje liniowo od bieżącej pozy do docelowej, krok po kroku
+        wykonując symulację (animacja ruchu zamiast skoku).
+        """
+        ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, target_pos)
+        target_angles = list(ik_angles)[:self.NUM_JOINTS]
+        for i, (lo, hi) in enumerate(JOINT_LIMITS_RAD):
+            target_angles[i] = float(np.clip(target_angles[i], lo, hi))
+
+        start_angles = list(self.current_angles)
+        for s in range(1, steps + 1):
+            t = s / steps
+            for i in range(self.NUM_JOINTS):
+                angle = start_angles[i] + (target_angles[i] - start_angles[i]) * t
+                p.setJointMotorControl2(
+                    self.robot, i,
+                    p.POSITION_CONTROL,
+                    targetPosition=angle,
+                    force=200,
+                    maxVelocity=1.5,
+                )
+            self._update_audio()
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
+
+        self.current_angles = target_angles
+        self.prev_angles = list(target_angles)
+
+    def _auto_grab(self):
+        """Chwyt kostki używany przez sekwencję Pick & Place."""
+        self.gripper_active = True
+        if self.constraint_id is None:
+            self._try_grab()
+
+    def _auto_release(self):
+        """Puszczenie kostki używane przez sekwencję Pick & Place."""
+        self.gripper_active = False
+        if self.constraint_id is not None:
+            self._release()
+
+    def run_pick_and_place(self):
+        """Ustawia punkty A/B z suwaków i uruchamia sekwencję pobierz-i-odłóż."""
+        point_a = self._read_point(self.cube_sliders)
+        point_b = self._read_point(self.point_b_sliders)
+        self.reset_cube_position()
+        self.pick_and_place.set_points(point_a, point_b)
+        self.pick_and_place.execute()
+
     def sync_state_after_play(self):
         if not self.controller.waypoints:
             return
@@ -224,6 +298,8 @@ class RobotSimulation:
     def run(self):
         print("====== SYMULACJA ROBOTA — TRYB NAGRYWANIA ======")
         print("Klawiatura:  baza |  ramię1 | Z/X ramię2 | C/V przegub | SPACJA chwytak")
+        print("Przyciski:   NAGRYWAJ / ODTWORZ / ZAPISZ JSON / WCZYTAJ JSON")
+        print("Pick & Place: ustaw punkt A (kostka) i B (cel), naciśnij WYKONAJ A->B")
 
         while True:
             self.tick_counter += 1
@@ -250,6 +326,15 @@ class RobotSimulation:
 
             if self._check_button('clear'):
                 self.controller.clear_sequence()
+
+            if self._check_button('save_json'):
+                self.controller.save_to_json()
+
+            if self._check_button('load_json'):
+                self.controller.load_from_json()
+
+            if self._check_button('pick_place'):
+                self.run_pick_and_place()
 
             # 3. Ciągłe nagrywanie w tle
             if self.controller.is_recording and self.tick_counter % 10 == 0:
