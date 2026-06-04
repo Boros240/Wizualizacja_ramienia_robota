@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Pliki wygenerowane przez symulację
+sequence.json
