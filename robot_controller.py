@@ -289,3 +289,72 @@ class TeachAndPlayController:
         p.removeConstraint(constraint_id)
         for i in range(-1, p.getNumJoints(self.robot_id)):
             p.setCollisionFilterPair(self.robot_id, cube_id, i, -1, 1)
+
+
+class PickAndPlaceController:
+    """Realizuje automatyczną sekwencję „pobierz i odłóż" między dwoma
+    punktami A i B.
+
+    Koncepcja: w punkcie A ramię chwyta kostkę, przenosi ją nad punkt B
+    i tam opuszcza. Klasa odpowiada wyłącznie za *plan* ruchu — fizyczne
+    przemieszczanie ramienia oraz chwytanie/puszczanie kostki realizują
+    funkcje (callbacki) przekazane przy tworzeniu obiektu. Dzięki temu
+    logika zadania jest odseparowana od silnika fizyki (zasada pojedynczej
+    odpowiedzialności).
+    """
+
+    def __init__(self, move_fn, grab_fn, release_fn,
+                 approach_height: float = 0.45, grab_clearance: float = 0.07):
+        self._move = move_fn        # move_fn(pozycja_xyz) -> przesuwa końcówkę
+        self._grab = grab_fn        # grab_fn() -> próbuje chwycić kostkę
+        self._release = release_fn  # release_fn() -> puszcza kostkę
+        # Wysokość, na jaką ramię podchodzi NAD punkt przed opuszczeniem.
+        self.approach_height = approach_height
+        # Wysokość zatrzymania końcówki nad punktem przy chwytaniu/odkładaniu
+        # (ramię nie sięga do samej podłogi, więc „zawisa" tuż nad kostką).
+        self.grab_clearance = grab_clearance
+
+        self.point_a: list | None = None
+        self.point_b: list | None = None
+        self.is_running = False
+
+    def set_points(self, point_a, point_b):
+        """Ustawia punkt pobrania (A) i punkt odłożenia (B)."""
+        self.point_a = list(point_a)
+        self.point_b = list(point_b)
+
+    def execute(self) -> bool:
+        """Wykonuje pełną sekwencję A → B (pobranie i odłożenie)."""
+        if self.point_a is None or self.point_b is None:
+            print(" Najpierw ustaw punkty A i B.")
+            return False
+        if self.is_running:
+            return False
+
+        self.is_running = True
+        a, b = self.point_a, self.point_b
+        above_a = [a[0], a[1], a[2] + self.approach_height]
+        above_b = [b[0], b[1], b[2] + self.approach_height]
+        down_a  = [a[0], a[1], a[2] + self.grab_clearance]
+        down_b  = [b[0], b[1], b[2] + self.grab_clearance]
+
+        print(f"\n PICK & PLACE:  A={[round(v, 2) for v in a]}  ->  "
+              f"B={[round(v, 2) for v in b]}")
+
+        # 1. Podejście z góry nad punkt A i opuszczenie do kostki
+        self._move(above_a)
+        self._move(down_a)
+        # 2. Chwyt kostki
+        self._grab()
+        # 3. Podniesienie i transport nad punkt B
+        self._move(above_a)
+        self._move(above_b)
+        # 4. Opuszczenie i puszczenie kostki
+        self._move(down_b)
+        self._release()
+        # 5. Odsunięcie ramienia w górę
+        self._move(above_b)
+
+        print(" PICK & PLACE zakończone.")
+        self.is_running = False
+        return True

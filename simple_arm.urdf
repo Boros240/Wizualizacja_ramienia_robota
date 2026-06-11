@@ -100,15 +100,15 @@
   <link name="link1">
     <!-- główny trzon -->
     <visual>
-      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <origin xyz="0 0 0.19" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.76" radius="0.09"/>
+        <cylinder length="0.38" radius="0.09"/>
       </geometry>
       <material name="dark_metal"/>
     </visual>
     <!-- ozdobny środkowy pierścień -->
     <visual>
-      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <origin xyz="0 0 0.19" rpy="0 0 0"/>
       <geometry>
         <cylinder length="0.08" radius="0.11"/>
       </geometry>
@@ -116,7 +116,7 @@
     </visual>
     <!-- kula u góry (przejście do joint2) -->
     <visual>
-      <origin xyz="0 0 0.78" rpy="0 0 0"/>
+      <origin xyz="0 0 0.39" rpy="0 0 0"/>
       <geometry>
         <sphere radius="0.11"/>
       </geometry>
@@ -124,13 +124,13 @@
     </visual>
 
     <collision>
-      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <origin xyz="0 0 0.19" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.76" radius="0.09"/>
+        <cylinder length="0.38" radius="0.09"/>
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 0.4" rpy="0 0 0"/>
+      <origin xyz="0 0 0.19" rpy="0 0 0"/>
       <mass value="16"/>
       <inertia ixx="0.96" ixy="0" ixz="0" iyy="0.96" iyz="0" izz="0.128"/>
     </inertial>
@@ -144,7 +144,7 @@
   <joint name="joint2" type="revolute">
     <parent link="link1"/>
     <child  link="link2"/>
-    <origin xyz="0 0 0.78" rpy="0 0 0"/>
+    <origin xyz="0 0 0.39" rpy="0 0 0"/>
     <axis   xyz="0 2 0"/>
     <limit  lower="-1.57" upper="1.57" effort="240" velocity="1.2"/>
     <dynamics damping="6.4" friction="1.6"/>

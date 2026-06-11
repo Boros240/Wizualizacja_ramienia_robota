@@ -3,7 +3,7 @@ import pybullet_data
 import time
 import numpy as np
 import pygame
-from robot_controller import TeachAndPlayController
+from robot_controller import TeachAndPlayController, PickAndPlaceController
 
 # ---------------------------------------------------------------------------
 # Limity stawów w stopniach — spójne z wartościami w pliku simple_arm.urdf.
@@ -23,9 +23,12 @@ JOINT_LIMITS_RAD = [(np.deg2rad(lo), np.deg2rad(hi)) for lo, hi in JOINT_LIMITS_
 class RobotSimulation:
     EE_INDEX      = 4   # indeks ogniwa end-effektora w URDF
     NUM_JOINTS    = 4   # liczba sterowanych stawów
-    GRAB_THRESHOLD = 0.25  # maksymalny dystans [m] do chwytania kostki
+    # Ramię jest duże i nie sięga do samej podłogi — końcówka „zawisa" kilka
+    # cm nad kostką, dlatego próg chwytania musi to uwzględniać.
+    GRAB_THRESHOLD = 0.4  # maksymalny dystans [m] do chwytania kostki
 
-    def __init__(self):
+    def __init__(self, gui: bool = True):
+        self.gui = gui
         self._setup_physics()
         self._load_models()
         self._setup_ui()
@@ -48,14 +51,14 @@ class RobotSimulation:
     # ------------------------------------------------------------------
 
     def _setup_physics(self):
-        p.connect(p.GUI)
+        p.connect(p.GUI if self.gui else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
 
     def _load_models(self):
         self.plane = p.loadURDF("plane.urdf")
-        self.cube  = p.loadURDF("cube.urdf",       [0.3, 0.0, 0.2], useFixedBase=False)
-        self.robot = p.loadURDF("simple_arm.urdf", [0,   0,   0  ], useFixedBase=True)
+        self.cube  = p.loadURDF("cube.urdf",       [0.45, 0.0, 0.08], useFixedBase=False)
+        self.robot = p.loadURDF("simple_arm.urdf", [0,    0,   0   ], useFixedBase=True)
 
     def _setup_ui(self):
         self.sliders = {
@@ -63,10 +66,18 @@ class RobotSimulation:
             'y': p.addUserDebugParameter("Ramię Cel Y", -0.8, 0.8, 0.0),
             'z': p.addUserDebugParameter("Ramię Cel Z",  0.1, 1.0, 0.4),
         }
+        # Punkt A = pozycja startowa kostki (punkt pobrania).
+        # Domyślne wartości leżą w zasięgu ramienia (promień ~0.45 m).
         self.cube_sliders = {
-            'x': p.addUserDebugParameter("Start Kostki X", -0.8, 0.8, 0.3),
-            'y': p.addUserDebugParameter("Start Kostki Y", -0.8, 0.8, 0.0),
-            'z': p.addUserDebugParameter("Start Kostki Z",  0.05, 1.0, 0.2),
+            'x': p.addUserDebugParameter("Punkt A (Kostka) X", -0.8, 0.8, 0.45),
+            'y': p.addUserDebugParameter("Punkt A (Kostka) Y", -0.8, 0.8, 0.0),
+            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.08, 1.0, 0.08),
+        }
+        # Punkt B = miejsce, w którym kostka ma zostać odłożona.
+        self.point_b_sliders = {
+            'x': p.addUserDebugParameter("Punkt B (Cel)  X", -0.8, 0.8, 0.0),
+            'y': p.addUserDebugParameter("Punkt B (Cel)  Y", -0.8, 0.8, 0.45),
+            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.08, 1.0, 0.08),
         }
         self.buttons = {
             'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
@@ -82,13 +93,16 @@ class RobotSimulation:
         self.btn_states = {k: 0 for k in self.buttons}
 
     def _setup_audio(self):
-        pygame.mixer.init()
+        self.motor_sound = None
+        self.motor_channel = None
         try:
+            pygame.mixer.init()
             self.motor_sound = pygame.mixer.Sound("motor.wav")
             self.motor_channel = pygame.mixer.Channel(0)
         except FileNotFoundError:
             print(" UWAGA: Brak pliku 'motor.wav'. Dźwięk nie będzie odtwarzany.")
-            self.motor_sound = None
+        except pygame.error as exc:
+            print(f" UWAGA: Audio niedostępne ({exc}). Dźwięk wyłączony.")
 
     # ------------------------------------------------------------------
     # Obsługa wejść użytkownika i Audio
@@ -111,10 +125,8 @@ class RobotSimulation:
         """Sterowanie przez suwaki IK — aktualizuje kąty tylko przy zmianie."""
         vals = [p.readUserDebugParameter(self.sliders[k]) for k in ('x', 'y', 'z')]
         if any(abs(v - pv) > 0.001 for v, pv in zip(vals, self.prev_slider_vals)):
-            ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, vals)
-            self.current_angles   = list(ik_angles)[:self.NUM_JOINTS]
+            self.current_angles   = self._solve_ik(vals)
             self.prev_slider_vals = vals
-            self._clamp_angles()
 
     def handle_keyboard(self):
         """Sterowanie klawiaturą."""
@@ -340,6 +352,15 @@ class RobotSimulation:
 
             if self._check_button('clear'):
                 self.controller.clear_sequence()
+
+            if self._check_button('save_json'):
+                self.controller.save_to_json()
+
+            if self._check_button('load_json'):
+                self.controller.load_from_json()
+
+            if self._check_button('pick_place'):
+                self.run_pick_and_place()
 
             # 3. Ciągłe nagrywanie w tle
             if self.controller.is_recording and self.tick_counter % 10 == 0:
