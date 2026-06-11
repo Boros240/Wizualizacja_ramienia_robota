@@ -27,6 +27,11 @@ class RobotSimulation:
     EE_INDEX      = 4   # indeks ogniwa end-effektora w URDF
     NUM_JOINTS    = 4   # liczba sterowanych stawów
     GRAB_THRESHOLD = 0.15  # maksymalny dystans [m] do chwytania kostki
+    USER_POINT_LIMITS = {
+        "x": (-0.8, 0.8),
+        "y": (-0.8, 0.8),
+        "z": (0.05, 1.0),
+    }
 
     def __init__(self):
         self._setup_physics()
@@ -69,6 +74,7 @@ class RobotSimulation:
         }
         self.buttons = {
             'set_cube': p.addUserDebugParameter("USTAW KOSTKĘ NA STARCIE",  1, 0, 0),
+            'transfer_cube': p.addUserDebugParameter(" PRZENIEŚ KOSTKĘ A -> B", 1, 0, 0),
             'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
             'play':     p.addUserDebugParameter(" ODTWÓRZ SEKWENCJĘ",     1, 0, 0),
             'import':   p.addUserDebugParameter(" IMPORTUJ JSON",          1, 0, 0),
@@ -192,6 +198,132 @@ class RobotSimulation:
     # Narzędzia
     # ------------------------------------------------------------------
 
+    def _clamp_cartesian_point(self, point):
+        """Przycina punkt XYZ do bezpiecznego obszaru roboczego robota."""
+        clamped_point = []
+        for idx, axis in enumerate(("x", "y", "z")):
+            lo, hi = self.USER_POINT_LIMITS[axis]
+            clamped_point.append(float(np.clip(point[idx], lo, hi)))
+        return clamped_point
+
+    def _read_point_from_user(self, point_name: str):
+        """Pobiera od użytkownika punkt XYZ w formacie 'x y z' lub 'x,y,z'."""
+        while True:
+            raw_value = input(
+                f"Podaj współrzędne punktu {point_name} [x y z] "
+                f"w zakresie x/y ({self.USER_POINT_LIMITS['x'][0]}..{self.USER_POINT_LIMITS['x'][1]}), "
+                f"z ({self.USER_POINT_LIMITS['z'][0]}..{self.USER_POINT_LIMITS['z'][1]}): "
+            ).strip()
+            normalized = raw_value.replace(",", " ")
+            parts = [part for part in normalized.split(" ") if part]
+
+            if len(parts) != 3:
+                print("⚠ Niepoprawny format. Wpisz dokładnie trzy liczby, np. 0.2 0.1 0.2")
+                continue
+
+            try:
+                values = [float(part) for part in parts]
+            except ValueError:
+                print("⚠ Dozwolone są wyłącznie liczby, np. 0.2 0.1 0.2")
+                continue
+
+            clamped = self._clamp_cartesian_point(values)
+            if any(abs(a - b) > 1e-9 for a, b in zip(values, clamped)):
+                print(f"ℹ Punkt {point_name} został przycięty do obszaru roboczego: {clamped}")
+
+            return clamped
+
+    def _move_end_effector_to(self, target_xyz, duration_s: float = 1.0):
+        """Przemieszcza end-effektor do punktu XYZ płynnie w przestrzeni stawów."""
+        target_xyz = self._clamp_cartesian_point(target_xyz)
+        ik_solution = p.calculateInverseKinematics(self.robot, self.EE_INDEX, target_xyz)
+        target_angles = list(ik_solution)[:self.NUM_JOINTS]
+        for idx, (lo, hi) in enumerate(JOINT_LIMITS_RAD):
+            target_angles[idx] = float(np.clip(target_angles[idx], lo, hi))
+
+        start_angles = list(self.current_angles)
+        steps = max(1, int(duration_s * 240))
+        for step in range(steps):
+            alpha = (step + 1) / steps
+            interpolated = [
+                start + (target - start) * alpha
+                for start, target in zip(start_angles, target_angles)
+            ]
+            for joint_idx, angle in enumerate(interpolated):
+                p.setJointMotorControl2(
+                    self.robot,
+                    joint_idx,
+                    p.POSITION_CONTROL,
+                    targetPosition=angle,
+                    force=200,
+                    maxVelocity=1.5,
+                )
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
+
+        self.current_angles = target_angles
+        self._clamp_angles()
+
+    def _set_gripper_state(self, active: bool):
+        """
+        Ustawia stan chwytaka:
+          active=True  -> próbuje chwycić kostkę i zwraca True/False
+          active=False -> zwalnia kostkę
+        """
+        if active:
+            if self.constraint_id is None:
+                self.gripper_active = True
+                self._try_grab()
+            grab_succeeded = self.constraint_id is not None
+            self.gripper_active = grab_succeeded
+            return grab_succeeded
+
+        if self.constraint_id is not None:
+            self._release()
+        self.gripper_active = False
+        return True
+
+    def transfer_cube_from_a_to_b(self, point_a, point_b):
+        """
+        Sekwencja: podejście nad A -> zejście do A -> chwyt -> podniesienie
+        -> ruch nad B -> zejście do B -> odłożenie -> odejście od kostki.
+        """
+        point_a = self._clamp_cartesian_point(point_a)
+        point_b = self._clamp_cartesian_point(point_b)
+
+        hover_height = 0.18
+        point_a_hover = self._clamp_cartesian_point([point_a[0], point_a[1], point_a[2] + hover_height])
+        point_b_hover = self._clamp_cartesian_point([point_b[0], point_b[1], point_b[2] + hover_height])
+
+        # Ustaw kostkę dokładnie w punkcie A, aby ruch był deterministyczny.
+        p.resetBasePositionAndOrientation(self.cube, point_a, [0, 0, 0, 1])
+        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
+        self._set_gripper_state(False)
+
+        print(f"▶ Transfer kostki: A={point_a} -> B={point_b}")
+        self._move_end_effector_to(point_a_hover, duration_s=0.9)
+        self._move_end_effector_to(point_a, duration_s=0.7)
+
+        if not self._set_gripper_state(True):
+            print("⚠ Nie udało się chwycić kostki w punkcie A.")
+            self._move_end_effector_to(point_a_hover, duration_s=0.6)
+            return False
+
+        self._move_end_effector_to(point_a_hover, duration_s=0.8)
+        self._move_end_effector_to(point_b_hover, duration_s=1.1)
+        self._move_end_effector_to(point_b, duration_s=0.7)
+        self._set_gripper_state(False)
+        self._move_end_effector_to(point_b_hover, duration_s=0.7)
+        print("✅ Transfer kostki zakończony.")
+        return True
+
+    def transfer_cube_from_user_points(self):
+        """Pobiera punkty A/B od użytkownika i uruchamia transfer kostki."""
+        print("\n=== TRYB A -> B ===")
+        point_a = self._read_point_from_user("A")
+        point_b = self._read_point_from_user("B")
+        self.transfer_cube_from_a_to_b(point_a, point_b)
+
     def reset_cube_position(self):
         """Resetuje pozycję kostki do wartości z suwaków."""
         cx, cy, cz = [p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')]
@@ -227,6 +359,9 @@ class RobotSimulation:
             # 2. Przyciski UI
             if self._check_button('set_cube'):
                 self.reset_cube_position()
+
+            if self._check_button('transfer_cube'):
+                self.transfer_cube_from_user_points()
 
             if self._check_button('record'):
                 self.controller.toggle_recording()
