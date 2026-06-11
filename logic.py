@@ -353,15 +353,6 @@ class RobotSimulation:
             if self._check_button('clear'):
                 self.controller.clear_sequence()
 
-            if self._check_button('save_json'):
-                self.controller.save_to_json()
-
-            if self._check_button('load_json'):
-                self.controller.load_from_json()
-
-            if self._check_button('pick_place'):
-                self.run_pick_and_place()
-
             # 3. Ciągłe nagrywanie w tle
             if self.controller.is_recording and self.tick_counter % 10 == 0:
                 self.controller.record_frame(self.current_angles, self.gripper_active, self.cube)
