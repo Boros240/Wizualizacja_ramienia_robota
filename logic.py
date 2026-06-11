@@ -64,7 +64,7 @@ class RobotSimulation:
         self.sliders = {
             'x': p.addUserDebugParameter("Ramię Cel X", -0.8, 0.8, 0.3),
             'y': p.addUserDebugParameter("Ramię Cel Y", -0.8, 0.8, 0.0),
-            'z': p.addUserDebugParameter("Ramię Cel Z",  0.1, 1.0, 0.4),
+            'z': p.addUserDebugParameter("Ramię Cel Z",  0.0, 1.0, 0.4),
         }
         # Punkt A = pozycja startowa kostki (punkt pobrania).
         self.cube_sliders = {
