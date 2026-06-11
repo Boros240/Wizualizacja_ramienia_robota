@@ -1,11 +1,11 @@
 <?xml version="1.0"?>
 <robot name="cube">
-  <!-- Mała kostka (0.16 m) dopasowana do zasięgu chwytaka ramienia.
+  <!-- Kostka 0.12 m — wchodzi między palce chwytaka (przerwa ~0.16 m).
        Dla bryły o boku a i masie m: I = m*(a^2 + a^2)/12. -->
   <link name="cube_link">
     <visual>
       <geometry>
-        <box size="0.16 0.16 0.16"/>
+        <box size="0.12 0.12 0.12"/>
       </geometry>
       <material name="blue">
         <color rgba="0 0 1 1"/>
@@ -13,12 +13,12 @@
     </visual>
     <collision>
       <geometry>
-        <box size="0.16 0.16 0.16"/>
+        <box size="0.12 0.12 0.12"/>
       </geometry>
     </collision>
     <inertial>
       <mass value="0.2"/>
-      <inertia ixx="0.000853" ixy="0" ixz="0" iyy="0.000853" iyz="0" izz="0.000853"/>
+      <inertia ixx="0.00048" ixy="0" ixz="0" iyy="0.00048" iyz="0" izz="0.00048"/>
     </inertial>
   </link>
 </robot>

@@ -21,11 +21,12 @@ JOINT_LIMITS_RAD = [(np.deg2rad(lo), np.deg2rad(hi)) for lo, hi in JOINT_LIMITS_
 
 
 class RobotSimulation:
-    EE_INDEX      = 4   # indeks ogniwa end-effektora w URDF
+    EE_INDEX      = 4   # ogniwo chwytaka (do więzu trzymającego kostkę)
+    TCP_INDEX     = 5   # wirtualny punkt narzędziowy MIĘDZY palcami (IK + dystans)
     NUM_JOINTS    = 4   # liczba sterowanych stawów
-    # Ramię jest duże i nie sięga do samej podłogi — końcówka „zawisa" kilka
-    # cm nad kostką, dlatego próg chwytania musi to uwzględniać.
-    GRAB_THRESHOLD = 0.4  # maksymalny dystans [m] do chwytania kostki
+    # IK celuje teraz TCP wprost w środek kostki, więc dystans chwytania jest
+    # mały — wystarczy niewielki próg (kostka faktycznie jest między palcami).
+    GRAB_THRESHOLD = 0.1  # maksymalny dystans [m] do chwytania kostki
 
     def __init__(self, gui: bool = True):
         self.gui = gui
@@ -34,7 +35,7 @@ class RobotSimulation:
         self._setup_ui()
         self._setup_audio()
 
-        self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
+        self.controller = TeachAndPlayController(self.robot, self.EE_INDEX, self.TCP_INDEX)
         self.pick_and_place = PickAndPlaceController(
             move_fn=self.move_ee_to,
             grab_fn=self._auto_grab,
@@ -60,7 +61,7 @@ class RobotSimulation:
 
     def _load_models(self):
         self.plane = p.loadURDF("plane.urdf")
-        self.cube  = p.loadURDF("cube.urdf",       [0.45, 0.0, 0.08], useFixedBase=False)
+        self.cube  = p.loadURDF("cube.urdf",       [0.45, 0.0, 0.06], useFixedBase=False)
         self.robot = p.loadURDF("simple_arm.urdf", [0,    0,   0   ], useFixedBase=True)
 
     def _setup_ui(self):
@@ -74,13 +75,13 @@ class RobotSimulation:
         self.cube_sliders = {
             'x': p.addUserDebugParameter("Punkt A (Kostka) X", -0.8, 0.8, 0.45),
             'y': p.addUserDebugParameter("Punkt A (Kostka) Y", -0.8, 0.8, 0.0),
-            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.08, 1.0, 0.08),
+            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.06, 1.0, 0.06),
         }
         # Punkt B = miejsce, w którym kostka ma zostać odłożona.
         self.point_b_sliders = {
             'x': p.addUserDebugParameter("Punkt B (Cel)  X", -0.8, 0.8, 0.0),
             'y': p.addUserDebugParameter("Punkt B (Cel)  Y", -0.8, 0.8, 0.45),
-            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.08, 1.0, 0.08),
+            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.06, 1.0, 0.06),
         }
         self.buttons = {
             'set_cube':   p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
@@ -189,16 +190,35 @@ class RobotSimulation:
         elif not self.gripper_active and self.constraint_id is not None:
             self._release()
 
+    def _disable_cube_collision(self):
+        """Wyłącza kolizje robot↔kostka (by chwytak nie odpychał kostki)."""
+        for i in range(-1, p.getNumJoints(self.robot)):
+            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 0)
+
+    def _enable_cube_collision(self):
+        """Przywraca kolizje robot↔kostka."""
+        for i in range(-1, p.getNumJoints(self.robot)):
+            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1)
+
+    def _set_gripper_floor_collision(self, enabled: int):
+        """Włącza/wyłącza kolizję palców z podłożem.
+
+        Aby chwycić kostkę leżącą na podłodze, palce muszą zejść do jej
+        poziomu — wtedy stykają się z podłożem i blokują ruch. Na czas
+        sekwencji Pick & Place wyłączamy tę kolizję.
+        """
+        for li in (self.EE_INDEX, self.TCP_INDEX):
+            p.setCollisionFilterPair(self.robot, self.plane, li, -1, enabled)
+
     def _try_grab(self):
         cube_pos = p.getBasePositionAndOrientation(self.cube)[0]
-        ee_pos   = p.getLinkState(self.robot, self.EE_INDEX)[0]
+        tcp_pos  = p.getLinkState(self.robot, self.TCP_INDEX)[4]
 
-        if np.linalg.norm(np.array(cube_pos) - np.array(ee_pos)) >= self.GRAB_THRESHOLD:
+        if np.linalg.norm(np.array(cube_pos) - np.array(tcp_pos)) >= self.GRAB_THRESHOLD:
             self.gripper_active = False
             return
 
-        for i in range(-1, p.getNumJoints(self.robot)):
-            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 0)
+        self._disable_cube_collision()
 
         ee_pos,   ee_orn   = p.getLinkState(self.robot, self.EE_INDEX)[0:2]
         cube_pos, cube_orn = p.getBasePositionAndOrientation(self.cube)
@@ -213,8 +233,8 @@ class RobotSimulation:
     def _release(self):
         p.removeConstraint(self.constraint_id)
         self.constraint_id = None
-        for i in range(-1, p.getNumJoints(self.robot)):
-            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1)
+        self._enable_cube_collision()
+        self._set_gripper_floor_collision(1)
 
     # ------------------------------------------------------------------
     # Narzędzia
@@ -245,7 +265,7 @@ class RobotSimulation:
         upper = [hi for lo, hi in JOINT_LIMITS_RAD]
         ranges = [hi - lo for lo, hi in JOINT_LIMITS_RAD]
         ik_angles = p.calculateInverseKinematics(
-            self.robot, self.EE_INDEX, target_pos,
+            self.robot, self.TCP_INDEX, target_pos,
             lowerLimits=lower, upperLimits=upper, jointRanges=ranges,
             restPoses=list(self.current_angles),
             maxNumIterations=300, residualThreshold=1e-5,
@@ -294,18 +314,36 @@ class RobotSimulation:
             self._try_grab()
 
     def _auto_release(self):
-        """Puszczenie kostki używane przez sekwencję Pick & Place."""
+        """Puszczenie kostki w sekwencji Pick & Place.
+
+        Usuwa TYLKO więz — kolizje pozostają wyłączone, aż ramię odsunie się
+        w górę (przywraca je `run_pick_and_place`). Dzięki temu palce nie
+        odpychają kostki w momencie puszczenia.
+        """
         self.gripper_active = False
         if self.constraint_id is not None:
-            self._release()
+            p.removeConstraint(self.constraint_id)
+            self.constraint_id = None
 
     def run_pick_and_place(self):
         """Ustawia punkty A/B z suwaków i uruchamia sekwencję pobierz-i-odłóż."""
         point_a = self._read_point(self.cube_sliders)
         point_b = self._read_point(self.point_b_sliders)
         self.reset_cube_position()
+        # Na czas sekwencji wyłączamy kolizje robot↔kostka (by chwytak nie
+        # strącił kostki) oraz palce↔podłoga (by palce mogły zejść do kostki
+        # leżącej na podłodze). Zostaną przywrócone przy puszczeniu.
+        self._disable_cube_collision()
+        self._set_gripper_floor_collision(0)
         self.pick_and_place.set_points(point_a, point_b)
         self.pick_and_place.execute()
+        # Ramię jest już odsunięte w górę — bezpiecznie przywracamy kolizje
+        # (gdyby coś jeszcze trzymało kostkę, najpierw ją puszczamy).
+        if self.constraint_id is not None:
+            p.removeConstraint(self.constraint_id)
+            self.constraint_id = None
+        self._enable_cube_collision()
+        self._set_gripper_floor_collision(1)
 
     def sync_state_after_play(self):
         if not self.controller.waypoints:

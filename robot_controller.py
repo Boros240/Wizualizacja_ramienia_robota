@@ -11,11 +11,13 @@ class TeachAndPlayController:
     Kontroler trybu „Ucz i Odtwarzaj" (Teach & Play).
     """
 
-    GRAB_THRESHOLD = 0.4  # dystans [m] do automatycznego chwytania przy odtwarzaniu
+    GRAB_THRESHOLD = 0.1  # dystans [m] do automatycznego chwytania przy odtwarzaniu
 
-    def __init__(self, robot_id: int, end_effector_index: int):
+    def __init__(self, robot_id: int, end_effector_index: int, tcp_index: int = None):
         self.robot_id = robot_id
         self.ee_idx   = end_effector_index
+        # Punkt narzędziowy (między palcami) do liczenia dystansu chwytania.
+        self.tcp_idx  = tcp_index if tcp_index is not None else end_effector_index
 
         self.waypoints:  list[dict] = []
         self.is_playing  = False
@@ -182,8 +184,8 @@ class TeachAndPlayController:
 
     def _is_close_to_cube(self, cube_id: int) -> bool:
         cube_pos, _ = p.getBasePositionAndOrientation(cube_id)
-        ee_pos = p.getLinkState(self.robot_id, self.ee_idx)[0]
-        return np.linalg.norm(np.array(cube_pos) - np.array(ee_pos)) < self.GRAB_THRESHOLD
+        tcp_pos = p.getLinkState(self.robot_id, self.tcp_idx)[4]
+        return np.linalg.norm(np.array(cube_pos) - np.array(tcp_pos)) < self.GRAB_THRESHOLD
 
     def _try_grab(self, cube_id: int) -> int | None:
         if not self._is_close_to_cube(cube_id):
@@ -221,14 +223,14 @@ class PickAndPlaceController:
     """
 
     def __init__(self, move_fn, grab_fn, release_fn,
-                 approach_height: float = 0.45, grab_clearance: float = 0.07):
+                 approach_height: float = 0.3, grab_clearance: float = 0.0):
         self._move = move_fn        # move_fn(pozycja_xyz) -> przesuwa końcówkę
         self._grab = grab_fn        # grab_fn() -> próbuje chwycić kostkę
         self._release = release_fn  # release_fn() -> puszcza kostkę
         # Wysokość, na jaką ramię podchodzi NAD punkt przed opuszczeniem.
         self.approach_height = approach_height
-        # Wysokość zatrzymania końcówki nad punktem przy chwytaniu/odkładaniu
-        # (ramię nie sięga do samej podłogi, więc „zawisa" tuż nad kostką).
+        # Punkt narzędziowy (TCP) celuje wprost w środek kostki, więc przy
+        # chwytaniu/odkładaniu zatrzymujemy się dokładnie na punkcie (offset 0).
         self.grab_clearance = grab_clearance
 
         self.point_a: list | None = None
