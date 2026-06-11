@@ -1,7 +1,10 @@
+import time
+from pathlib import Path
+
 import pybullet as p
 import pybullet_data
-import time
 import numpy as np
+
 from robot_controller import TeachAndPlayController
 
 # ---------------------------------------------------------------------------
@@ -17,6 +20,7 @@ JOINT_LIMITS_DEG = [
     ( -90.0,  90.0),   # joint_wrist – przegub
 ]
 JOINT_LIMITS_RAD = [(np.deg2rad(lo), np.deg2rad(hi)) for lo, hi in JOINT_LIMITS_DEG]
+MOTION_JSON_FILE = Path(__file__).with_name("robot_motion.json")
 
 
 class RobotSimulation:
@@ -67,6 +71,8 @@ class RobotSimulation:
             'set_cube': p.addUserDebugParameter("USTAW KOSTKĘ NA STARCIE",  1, 0, 0),
             'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
             'play':     p.addUserDebugParameter(" ODTWÓRZ SEKWENCJĘ",     1, 0, 0),
+            'import':   p.addUserDebugParameter(" IMPORTUJ JSON",          1, 0, 0),
+            'export':   p.addUserDebugParameter(" EKSPORTUJ JSON",         1, 0, 0),
             'clear':    p.addUserDebugParameter(" WYCZYŚĆ PAMIĘĆ",        1, 0, 0),
         }
         self.btn_states = {k: 0 for k in self.buttons}
@@ -209,6 +215,7 @@ class RobotSimulation:
     def run(self):
         print("====== SYMULACJA ROBOTA — TRYB NAGRYWANIA ======")
         print("Klawiatura:  baza |  ramię1 | Z/X ramię2 | C/V przegub | SPACJA chwytak")
+        print(f"Import/eksport JSON używa pliku: {MOTION_JSON_FILE}")
 
         while True:
             self.tick_counter += 1
@@ -228,6 +235,12 @@ class RobotSimulation:
                 self.reset_cube_position()
                 self.controller.play_sequence(self.cube)
                 self.sync_state_after_play()
+
+            if self._check_button('import'):
+                self.controller.import_sequence(MOTION_JSON_FILE)
+
+            if self._check_button('export'):
+                self.controller.export_sequence(MOTION_JSON_FILE)
 
             if self._check_button('clear'):
                 self.controller.clear_sequence()
