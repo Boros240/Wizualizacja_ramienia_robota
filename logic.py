@@ -317,12 +317,23 @@ class RobotSimulation:
         print("✅ Transfer kostki zakończony.")
         return True
 
-    def transfer_cube_from_user_points(self):
-        """Pobiera punkty A/B od użytkownika i uruchamia transfer kostki."""
-        print("\n=== TRYB A -> B ===")
+    def pick_and_place_from_user_input(self):
+        """
+        Pobiera punkty A/B od użytkownika i uruchamia sekwencję:
+        podniesienie kostki z A oraz przeniesienie jej do B.
+        """
+        print("\n=== TRYB PODNIESIENIA I PRZENIESIENIA KOSTKI (A -> B) ===")
         point_a = self._read_point_from_user("A")
         point_b = self._read_point_from_user("B")
-        self.transfer_cube_from_a_to_b(point_a, point_b)
+
+        if np.allclose(point_a, point_b, atol=1e-6):
+            print("ℹ Punkty A i B są identyczne — wykonam tylko podniesienie i odłożenie w tym samym miejscu.")
+
+        return self.transfer_cube_from_a_to_b(point_a, point_b)
+
+    def transfer_cube_from_user_points(self):
+        """Alias zgodności: uruchamia transfer A -> B z wejściem użytkownika."""
+        return self.pick_and_place_from_user_input()
 
     def reset_cube_position(self):
         """Resetuje pozycję kostki do wartości z suwaków."""
@@ -361,7 +372,7 @@ class RobotSimulation:
                 self.reset_cube_position()
 
             if self._check_button('transfer_cube'):
-                self.transfer_cube_from_user_points()
+                self.pick_and_place_from_user_input()
 
             if self._check_button('record'):
                 self.controller.toggle_recording()
