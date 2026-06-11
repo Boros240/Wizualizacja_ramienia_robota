@@ -29,7 +29,9 @@ class RobotSimulation:
     GRAB_THRESHOLD = 0.15  # maksymalny dystans [m] do chwytania kostki
     PICK_WRIST_ANGLE_RAD = -np.pi / 2  # sztywne ustawienie nadgarstka "w dół" przy chwytaniu
     APPROACH_DWELL_S = 0.25  # krótki "zawis" nad kostką przed zejściem
-    POST_PLACE_LIFT_M = 0.10  # pionowe odejście po odłożeniu kostki
+    DROP_RELEASE_HEIGHT_M = 0.12  # wysokość puszczania nad punktem B (swobodny opad)
+    POST_RELEASE_ESCAPE_LIFT_M = 0.28  # szybkie pionowe odsunięcie ramienia po puszczeniu
+    POST_RELEASE_COLLISION_DELAY_S = 0.35  # opóźnienie przywrócenia kolizji robot–kostka
     USER_POINT_LIMITS = {
         "x": (-0.8, 0.8),
         "y": (-0.8, 0.8),
@@ -174,6 +176,11 @@ class RobotSimulation:
         elif not self.gripper_active and self.constraint_id is not None:
             self._release()
 
+    def _set_robot_cube_collisions(self, enable: bool):
+        """Włącza/wyłącza kolizje między wszystkimi ogniwami robota a kostką."""
+        for i in range(-1, p.getNumJoints(self.robot)):
+            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1 if enable else 0)
+
     def _try_grab(self):
         """Próbuje przypiąć kostkę do end-effektora jeśli jest wystarczająco blisko."""
         cube_pos = p.getBasePositionAndOrientation(self.cube)[0]
@@ -184,8 +191,7 @@ class RobotSimulation:
             return
 
         # Wyłącz kolizje robot–kostka podczas trzymania
-        for i in range(-1, p.getNumJoints(self.robot)):
-            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 0)
+        self._set_robot_cube_collisions(False)
 
         # Oblicz pozycję kostki w układzie end-effektora
         ee_pos,   ee_orn   = p.getLinkState(self.robot, self.EE_INDEX)[0:2]
@@ -198,12 +204,12 @@ class RobotSimulation:
             p.JOINT_FIXED, [0, 0, 0], local_pos, [0, 0, 0], local_orn
         )
 
-    def _release(self):
-        """Odpina kostkę i przywraca kolizje."""
+    def _release(self, restore_collisions: bool = True):
+        """Odpina kostkę i opcjonalnie przywraca kolizje."""
         p.removeConstraint(self.constraint_id)
         self.constraint_id = None
-        for i in range(-1, p.getNumJoints(self.robot)):
-            p.setCollisionFilterPair(self.robot, self.cube, i, -1, 1)
+        if restore_collisions:
+            self._set_robot_cube_collisions(True)
 
     # ------------------------------------------------------------------
     # Narzędzia
@@ -316,7 +322,7 @@ class RobotSimulation:
         """
         Sekwencja: podejście nad A -> zawis -> pionowe zejście -> chwyt
         -> pionowe podniesienie -> ruch nad B -> zawis -> pionowe zejście
-        -> odłożenie -> pionowe podniesienie i zakończenie.
+        -> puszczenie nad B (swobodny opad) -> szybkie pionowe odejście.
         """
         point_a = self._clamp_cartesian_point(point_a)
         point_b = self._clamp_cartesian_point(point_b)
@@ -324,8 +330,11 @@ class RobotSimulation:
         hover_height = 0.18
         point_a_hover = self._clamp_cartesian_point([point_a[0], point_a[1], point_a[2] + hover_height])
         point_b_hover = self._clamp_cartesian_point([point_b[0], point_b[1], point_b[2] + hover_height])
+        point_b_release = self._clamp_cartesian_point(
+            [point_b[0], point_b[1], point_b[2] + self.DROP_RELEASE_HEIGHT_M]
+        )
         point_b_post_place = self._clamp_cartesian_point(
-            [point_b[0], point_b[1], point_b[2] + self.POST_PLACE_LIFT_M]
+            [point_b[0], point_b[1], point_b[2] + self.POST_RELEASE_ESCAPE_LIFT_M]
         )
 
         # Ustaw kostkę dokładnie w punkcie A, aby ruch był deterministyczny.
@@ -347,9 +356,17 @@ class RobotSimulation:
         self._move_end_effector_linearly(point_a_hover, duration_s=0.8, fixed_wrist_angle_rad=pick_wrist_angle)
         self._move_end_effector_to(point_b_hover, duration_s=1.1, fixed_wrist_angle_rad=pick_wrist_angle)
         self._hold_current_pose(self.APPROACH_DWELL_S)
-        self._move_end_effector_linearly(point_b, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
-        self._set_gripper_state(False)
-        self._move_end_effector_linearly(point_b_post_place, duration_s=0.5, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._move_end_effector_linearly(point_b_release, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
+
+        # Puszczamy wyżej nad B, a ramię od razu odsuwa się pionowo w górę.
+        # Kolizje przywracamy dopiero po chwili, by kostka nie turlała się po ramieniu.
+        if self.constraint_id is not None:
+            self._release(restore_collisions=False)
+        self.gripper_active = False
+
+        self._move_end_effector_linearly(point_b_post_place, duration_s=0.25, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._hold_current_pose(self.POST_RELEASE_COLLISION_DELAY_S)
+        self._set_robot_cube_collisions(True)
         print("✅ Transfer kostki zakończony.")
         return True
 
