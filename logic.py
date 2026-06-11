@@ -275,17 +275,23 @@ class RobotSimulation:
             for a, (lo, hi) in zip(list(ik_angles)[:self.NUM_JOINTS], JOINT_LIMITS_RAD)
         ]
 
-    def move_ee_to(self, target_pos, max_steps: int = 2500, tol: float = 0.01):
-        """Przesuwa końcówkę robota do zadanej pozycji XYZ i CZEKA, aż ramię
-        faktycznie tam dotrze.
+    def move_ee_to(self, target_pos, max_steps: int = 900,
+                   tol: float = 0.015, vel_eps: float = 0.03):
+        """Przesuwa końcówkę robota do zadanej pozycji XYZ.
 
-        Kluczowa zmiana względem poprzedniej wersji: pętla wykonuje kroki
-        symulacji dopóki rzeczywiste kąty stawów nie zbliżą się do zadanych
-        (albo do limitu kroków), a `current_angles` aktualizujemy realnym
-        odczytem ze stawów — nie wartością „życzeniową". Dzięki temu kolejne
-        ruchy nie kumulują błędu i chwyt trafia w kostkę.
+        Ruch kończy się, gdy spełniony jest KTÓRYKOLWIEK warunek:
+          • ramię osiągnęło zadane kąty (błąd < `tol`), albo
+          • ramię się ZATRZYMAŁO (prędkości stawów ~0 przez kilka kroków) —
+            co oznacza, że dalej już nie dojedzie (cel nieosiągalny/limit),
+          • przekroczono twardy limit `max_steps`.
+
+        Wcześniej ruch zawsze mielił do `max_steps` (≈10 s w GUI), przez co
+        sekwencja A→B sprawiała wrażenie zawieszonej i nie dochodziła do
+        etapu puszczenia kostki. Warunek prędkościowy kończy każdy ruch
+        natychmiast po ustabilizowaniu się ramienia.
         """
         target_angles = self._solve_ik(target_pos)
+        settled = 0
 
         for _ in range(max_steps):
             for i in range(self.NUM_JOINTS):
@@ -294,14 +300,21 @@ class RobotSimulation:
                     p.POSITION_CONTROL,
                     targetPosition=target_angles[i],
                     force=400,
-                    maxVelocity=2.0,
+                    maxVelocity=2.5,
                 )
-            actual = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
+            states = [p.getJointState(self.robot, i) for i in range(self.NUM_JOINTS)]
+            pos_err = max(abs(states[i][0] - target_angles[i]) for i in range(self.NUM_JOINTS))
+            vel_max = max(abs(states[i][1]) for i in range(self.NUM_JOINTS))
             self._update_audio()
             p.stepSimulation()
             if self.gui:
                 time.sleep(1.0 / 240.0)
-            if max(abs(actual[i] - target_angles[i]) for i in range(self.NUM_JOINTS)) < tol:
+
+            if pos_err < tol:
+                break
+            # Ramię stanęło, choć nie dotarło do celu — nie ma sensu czekać.
+            settled = settled + 1 if vel_max < vel_eps else 0
+            if settled >= 25:
                 break
 
         self.current_angles = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
