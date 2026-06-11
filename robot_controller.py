@@ -1,6 +1,9 @@
-import pybullet as p
+import json
 import time
+from pathlib import Path
+
 import numpy as np
+import pybullet as p
 
 
 class TeachAndPlayController:
@@ -15,6 +18,8 @@ class TeachAndPlayController:
     """
 
     GRAB_THRESHOLD = 0.15  # dystans [m] do automatycznego chwytania przy odtwarzaniu
+    JSON_FORMAT = "teach_and_play_motion"
+    JSON_VERSION = 1
 
     def __init__(self, robot_id: int, end_effector_index: int):
         self.robot_id = robot_id
@@ -60,6 +65,113 @@ class TeachAndPlayController:
         print("🗑 Pamięć sekwencji wyczyszczona.")
 
     # ------------------------------------------------------------------
+    # Import / eksport JSON
+    # ------------------------------------------------------------------
+
+    def export_sequence(self, file_path: str | Path):
+        """Zapisuje aktualnie nagraną trajektorię do pliku JSON."""
+        if not self.waypoints:
+            print("⚠ Brak zapisanych klatek do eksportu!")
+            return False
+
+        path = Path(file_path)
+        payload = {
+            "format": self.JSON_FORMAT,
+            "version": self.JSON_VERSION,
+            "frame_count": len(self.waypoints),
+            "waypoints": [self._normalize_waypoint(frame) for frame in self.waypoints],
+        }
+
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"💾 Wyeksportowano {len(self.waypoints)} klatek do {path}.")
+        return True
+
+    def import_sequence(self, file_path: str | Path):
+        """Wczytuje trajektorię z pliku JSON i zastępuje bieżącą sekwencję."""
+        path = Path(file_path)
+        if not path.exists():
+            print(f"⚠ Nie znaleziono pliku importu: {path}")
+            return False
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            imported_waypoints = self._parse_json_payload(payload)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            print(f"⚠ Nie udało się zaimportować sekwencji z {path}: {exc}")
+            return False
+
+        self.waypoints = imported_waypoints
+        self.is_recording = False
+        print(f"📂 Zaimportowano {len(self.waypoints)} klatek z {path}.")
+        return True
+
+    def _parse_json_payload(self, payload):
+        """Waliduje zawartość pliku JSON i zwraca listę waypointów."""
+        if not isinstance(payload, dict):
+            raise ValueError("plik musi zawierać obiekt JSON")
+
+        if payload.get("format") != self.JSON_FORMAT:
+            raise ValueError(f"nieobsługiwany format pliku: {payload.get('format')!r}")
+
+        if payload.get("version") != self.JSON_VERSION:
+            raise ValueError(f"nieobsługiwana wersja pliku: {payload.get('version')!r}")
+
+        raw_waypoints = payload.get("waypoints")
+        if not isinstance(raw_waypoints, list):
+            raise ValueError("pole 'waypoints' musi być listą")
+
+        frame_count = payload.get("frame_count")
+        if frame_count is not None and frame_count != len(raw_waypoints):
+            raise ValueError("pole 'frame_count' nie zgadza się z liczbą klatek")
+
+        normalized_waypoints = [self._normalize_waypoint(frame) for frame in raw_waypoints]
+        self._validate_joint_counts(normalized_waypoints)
+        return normalized_waypoints
+
+    def _normalize_waypoint(self, frame):
+        """Zwraca kanoniczną postać pojedynczej klatki ruchu."""
+        if not isinstance(frame, dict):
+            raise ValueError("każda klatka musi być obiektem JSON")
+
+        angles = self._float_list(frame.get("angles"), "angles")
+        cube_pos = self._float_list(frame.get("cube_pos"), "cube_pos", expected_len=3)
+        gripper = frame.get("gripper")
+        if not isinstance(gripper, bool):
+            raise ValueError("pole 'gripper' musi być wartością bool")
+
+        return {
+            "angles": angles,
+            "gripper": gripper,
+            "cube_pos": cube_pos,
+        }
+
+    def _float_list(self, values, field_name: str, expected_len: int | None = None):
+        if not isinstance(values, list):
+            raise ValueError(f"pole '{field_name}' musi być listą")
+
+        if expected_len is not None and len(values) != expected_len:
+            raise ValueError(f"pole '{field_name}' musi mieć długość {expected_len}")
+
+        normalized = []
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"pole '{field_name}' może zawierać tylko liczby")
+            normalized.append(float(value))
+        return normalized
+
+    def _validate_joint_counts(self, waypoints: list[dict]):
+        if not waypoints:
+            return
+
+        expected_count = len(waypoints[0]["angles"])
+        if expected_count == 0:
+            raise ValueError("pole 'angles' nie może być puste")
+
+        for frame in waypoints:
+            if len(frame["angles"]) != expected_count:
+                raise ValueError("wszystkie klatki muszą mieć tę samą liczbę kątów")
+
+    # ------------------------------------------------------------------
     # Odtwarzanie
     # ------------------------------------------------------------------
 
@@ -75,6 +187,11 @@ class TeachAndPlayController:
         print(f"\n▶ Odtwarzam {len(self.waypoints)} klatek...")
         self.is_playing  = True
         constraint_id = None
+
+        start_cube_pos = self.waypoints[0].get("cube_pos")
+        if start_cube_pos is not None:
+            p.resetBasePositionAndOrientation(cube_id, start_cube_pos, [0, 0, 0, 1])
+            p.resetBaseVelocity(cube_id, [0, 0, 0], [0, 0, 0])
 
         for step in self.waypoints:
             target_angles  = step["angles"]
