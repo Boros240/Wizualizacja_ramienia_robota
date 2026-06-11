@@ -28,6 +28,8 @@ class RobotSimulation:
     NUM_JOINTS    = 4   # liczba sterowanych stawów
     GRAB_THRESHOLD = 0.15  # maksymalny dystans [m] do chwytania kostki
     PICK_WRIST_ANGLE_RAD = -np.pi / 2  # sztywne ustawienie nadgarstka "w dół" przy chwytaniu
+    APPROACH_DWELL_S = 0.25  # krótki "zawis" nad kostką przed zejściem
+    POST_PLACE_LIFT_M = 0.10  # pionowe odejście po odłożeniu kostki
     USER_POINT_LIMITS = {
         "x": (-0.8, 0.8),
         "y": (-0.8, 0.8),
@@ -223,8 +225,8 @@ class RobotSimulation:
         ]
         return self._clamp_cartesian_point(values)
 
-    def _move_end_effector_to(self, target_xyz, duration_s: float = 1.0, fixed_wrist_angle_rad: float | None = None):
-        """Przemieszcza end-effektor do punktu XYZ płynnie w przestrzeni stawów."""
+    def _solve_ik_angles(self, target_xyz, fixed_wrist_angle_rad: float | None = None):
+        """Wyznacza i przycina kąty stawów dla zadanego punktu XYZ."""
         target_xyz = self._clamp_cartesian_point(target_xyz)
         ik_solution = p.calculateInverseKinematics(self.robot, self.EE_INDEX, target_xyz)
         target_angles = list(ik_solution)[:self.NUM_JOINTS]
@@ -233,6 +235,25 @@ class RobotSimulation:
         if fixed_wrist_angle_rad is not None and self.NUM_JOINTS >= 4:
             lo, hi = JOINT_LIMITS_RAD[3]
             target_angles[3] = float(np.clip(fixed_wrist_angle_rad, lo, hi))
+        return target_angles
+
+    def _set_joint_targets_for_step(self, target_angles):
+        """Ustawia pozycje stawów i wykonuje pojedynczy krok symulacji."""
+        for joint_idx, angle in enumerate(target_angles):
+            p.setJointMotorControl2(
+                self.robot,
+                joint_idx,
+                p.POSITION_CONTROL,
+                targetPosition=angle,
+                force=200,
+                maxVelocity=1.5,
+            )
+        p.stepSimulation()
+        time.sleep(1.0 / 240.0)
+
+    def _move_end_effector_to(self, target_xyz, duration_s: float = 1.0, fixed_wrist_angle_rad: float | None = None):
+        """Przemieszcza end-effektor do punktu XYZ płynnie w przestrzeni stawów."""
+        target_angles = self._solve_ik_angles(target_xyz, fixed_wrist_angle_rad=fixed_wrist_angle_rad)
 
         start_angles = list(self.current_angles)
         steps = max(1, int(duration_s * 240))
@@ -242,20 +263,35 @@ class RobotSimulation:
                 start + (target - start) * alpha
                 for start, target in zip(start_angles, target_angles)
             ]
-            for joint_idx, angle in enumerate(interpolated):
-                p.setJointMotorControl2(
-                    self.robot,
-                    joint_idx,
-                    p.POSITION_CONTROL,
-                    targetPosition=angle,
-                    force=200,
-                    maxVelocity=1.5,
-                )
-            p.stepSimulation()
-            time.sleep(1.0 / 240.0)
+            self._set_joint_targets_for_step(interpolated)
 
         self.current_angles = target_angles
         self._clamp_angles()
+
+    def _move_end_effector_linearly(self, target_xyz, duration_s: float = 0.6, fixed_wrist_angle_rad: float | None = None):
+        """Przemieszcza end-effektor liniowo w XYZ (np. pionowe zejście/podniesienie)."""
+        target_xyz = self._clamp_cartesian_point(target_xyz)
+        start_xyz = list(p.getLinkState(self.robot, self.EE_INDEX)[0])
+        steps = max(1, int(duration_s * 240))
+        last_angles = list(self.current_angles)
+
+        for step in range(steps):
+            alpha = (step + 1) / steps
+            waypoint_xyz = [
+                start + (target - start) * alpha
+                for start, target in zip(start_xyz, target_xyz)
+            ]
+            last_angles = self._solve_ik_angles(waypoint_xyz, fixed_wrist_angle_rad=fixed_wrist_angle_rad)
+            self._set_joint_targets_for_step(last_angles)
+
+        self.current_angles = last_angles
+        self._clamp_angles()
+
+    def _hold_current_pose(self, duration_s: float):
+        """Utrzymuje aktualną pozycję robota przez zadany czas."""
+        steps = max(1, int(duration_s * 240))
+        for _ in range(steps):
+            self._set_joint_targets_for_step(self.current_angles)
 
     def _set_gripper_state(self, active: bool):
         """
@@ -278,8 +314,9 @@ class RobotSimulation:
 
     def transfer_cube_from_a_to_b(self, point_a, point_b):
         """
-        Sekwencja: podejście nad A -> zejście do A -> chwyt -> podniesienie
-        -> ruch nad B -> zejście do B -> odłożenie -> odejście od kostki.
+        Sekwencja: podejście nad A -> zawis -> pionowe zejście -> chwyt
+        -> pionowe podniesienie -> ruch nad B -> zawis -> pionowe zejście
+        -> odłożenie -> pionowe podniesienie i zakończenie.
         """
         point_a = self._clamp_cartesian_point(point_a)
         point_b = self._clamp_cartesian_point(point_b)
@@ -287,6 +324,9 @@ class RobotSimulation:
         hover_height = 0.18
         point_a_hover = self._clamp_cartesian_point([point_a[0], point_a[1], point_a[2] + hover_height])
         point_b_hover = self._clamp_cartesian_point([point_b[0], point_b[1], point_b[2] + hover_height])
+        point_b_post_place = self._clamp_cartesian_point(
+            [point_b[0], point_b[1], point_b[2] + self.POST_PLACE_LIFT_M]
+        )
 
         # Ustaw kostkę dokładnie w punkcie A, aby ruch był deterministyczny.
         p.resetBasePositionAndOrientation(self.cube, point_a, [0, 0, 0, 1])
@@ -296,18 +336,20 @@ class RobotSimulation:
         print(f"▶ Transfer kostki: A={point_a} -> B={point_b}")
         pick_wrist_angle = self.PICK_WRIST_ANGLE_RAD
         self._move_end_effector_to(point_a_hover, duration_s=0.9, fixed_wrist_angle_rad=pick_wrist_angle)
-        self._move_end_effector_to(point_a, duration_s=0.7, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._hold_current_pose(self.APPROACH_DWELL_S)
+        self._move_end_effector_linearly(point_a, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
 
         if not self._set_gripper_state(True):
             print("⚠ Nie udało się chwycić kostki w punkcie A.")
-            self._move_end_effector_to(point_a_hover, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
+            self._move_end_effector_linearly(point_a_hover, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
             return False
 
-        self._move_end_effector_to(point_a_hover, duration_s=0.8, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._move_end_effector_linearly(point_a_hover, duration_s=0.8, fixed_wrist_angle_rad=pick_wrist_angle)
         self._move_end_effector_to(point_b_hover, duration_s=1.1, fixed_wrist_angle_rad=pick_wrist_angle)
-        self._move_end_effector_to(point_b, duration_s=0.7, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._hold_current_pose(self.APPROACH_DWELL_S)
+        self._move_end_effector_linearly(point_b, duration_s=0.6, fixed_wrist_angle_rad=pick_wrist_angle)
         self._set_gripper_state(False)
-        self._move_end_effector_to(point_b_hover, duration_s=0.7, fixed_wrist_angle_rad=pick_wrist_angle)
+        self._move_end_effector_linearly(point_b_post_place, duration_s=0.5, fixed_wrist_angle_rad=pick_wrist_angle)
         print("✅ Transfer kostki zakończony.")
         return True
 
