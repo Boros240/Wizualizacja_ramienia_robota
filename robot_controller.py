@@ -11,7 +11,7 @@ class TeachAndPlayController:
     Kontroler trybu „Ucz i Odtwarzaj" (Teach & Play).
     """
 
-    GRAB_THRESHOLD = 0.15  # dystans [m] do automatycznego chwytania przy odtwarzaniu
+    GRAB_THRESHOLD = 0.4  # dystans [m] do automatycznego chwytania przy odtwarzaniu
 
     def __init__(self, robot_id: int, end_effector_index: int):
         self.robot_id = robot_id
@@ -220,11 +220,16 @@ class PickAndPlaceController:
     odpowiedzialności).
     """
 
-    def __init__(self, move_fn, grab_fn, release_fn, approach_height: float = 0.25):
+    def __init__(self, move_fn, grab_fn, release_fn,
+                 approach_height: float = 0.45, grab_clearance: float = 0.07):
         self._move = move_fn        # move_fn(pozycja_xyz) -> przesuwa końcówkę
         self._grab = grab_fn        # grab_fn() -> próbuje chwycić kostkę
         self._release = release_fn  # release_fn() -> puszcza kostkę
+        # Wysokość, na jaką ramię podchodzi NAD punkt przed opuszczeniem.
         self.approach_height = approach_height
+        # Wysokość zatrzymania końcówki nad punktem przy chwytaniu/odkładaniu
+        # (ramię nie sięga do samej podłogi, więc „zawisa" tuż nad kostką).
+        self.grab_clearance = grab_clearance
 
         self.point_a: list | None = None
         self.point_b: list | None = None
@@ -247,20 +252,22 @@ class PickAndPlaceController:
         a, b = self.point_a, self.point_b
         above_a = [a[0], a[1], a[2] + self.approach_height]
         above_b = [b[0], b[1], b[2] + self.approach_height]
+        down_a  = [a[0], a[1], a[2] + self.grab_clearance]
+        down_b  = [b[0], b[1], b[2] + self.grab_clearance]
 
         print(f"\n PICK & PLACE:  A={[round(v, 2) for v in a]}  ->  "
               f"B={[round(v, 2) for v in b]}")
 
-        # 1. Podejście nad punkt A i opuszczenie do kostki
+        # 1. Podejście z góry nad punkt A i opuszczenie do kostki
         self._move(above_a)
-        self._move(a)
+        self._move(down_a)
         # 2. Chwyt kostki
         self._grab()
         # 3. Podniesienie i transport nad punkt B
         self._move(above_a)
         self._move(above_b)
         # 4. Opuszczenie i puszczenie kostki
-        self._move(b)
+        self._move(down_b)
         self._release()
         # 5. Odsunięcie ramienia w górę
         self._move(above_b)

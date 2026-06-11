@@ -23,9 +23,12 @@ JOINT_LIMITS_RAD = [(np.deg2rad(lo), np.deg2rad(hi)) for lo, hi in JOINT_LIMITS_
 class RobotSimulation:
     EE_INDEX      = 4   # indeks ogniwa end-effektora w URDF
     NUM_JOINTS    = 4   # liczba sterowanych stawów
-    GRAB_THRESHOLD = 0.25  # maksymalny dystans [m] do chwytania kostki
+    # Ramię jest duże i nie sięga do samej podłogi — końcówka „zawisa" kilka
+    # cm nad kostką, dlatego próg chwytania musi to uwzględniać.
+    GRAB_THRESHOLD = 0.4  # maksymalny dystans [m] do chwytania kostki
 
-    def __init__(self):
+    def __init__(self, gui: bool = True):
+        self.gui = gui
         self._setup_physics()
         self._load_models()
         self._setup_ui()
@@ -51,14 +54,14 @@ class RobotSimulation:
     # ------------------------------------------------------------------
 
     def _setup_physics(self):
-        p.connect(p.GUI)
+        p.connect(p.GUI if self.gui else p.DIRECT)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -9.81)
 
     def _load_models(self):
         self.plane = p.loadURDF("plane.urdf")
-        self.cube  = p.loadURDF("cube.urdf",       [0.3, 0.0, 0.2], useFixedBase=False)
-        self.robot = p.loadURDF("simple_arm.urdf", [0,   0,   0  ], useFixedBase=True)
+        self.cube  = p.loadURDF("cube.urdf",       [0.45, 0.0, 0.08], useFixedBase=False)
+        self.robot = p.loadURDF("simple_arm.urdf", [0,    0,   0   ], useFixedBase=True)
 
     def _setup_ui(self):
         self.sliders = {
@@ -67,16 +70,17 @@ class RobotSimulation:
             'z': p.addUserDebugParameter("Ramię Cel Z",  0.1, 1.0, 0.4),
         }
         # Punkt A = pozycja startowa kostki (punkt pobrania).
+        # Domyślne wartości leżą w zasięgu ramienia (promień ~0.45 m).
         self.cube_sliders = {
-            'x': p.addUserDebugParameter("Punkt A (Kostka) X", -0.8, 0.8, 0.3),
+            'x': p.addUserDebugParameter("Punkt A (Kostka) X", -0.8, 0.8, 0.45),
             'y': p.addUserDebugParameter("Punkt A (Kostka) Y", -0.8, 0.8, 0.0),
-            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.05, 1.0, 0.2),
+            'z': p.addUserDebugParameter("Punkt A (Kostka) Z",  0.08, 1.0, 0.08),
         }
         # Punkt B = miejsce, w którym kostka ma zostać odłożona.
         self.point_b_sliders = {
-            'x': p.addUserDebugParameter("Punkt B (Cel)  X", -0.8, 0.8, -0.3),
-            'y': p.addUserDebugParameter("Punkt B (Cel)  Y", -0.8, 0.8,  0.3),
-            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.05, 1.0,  0.2),
+            'x': p.addUserDebugParameter("Punkt B (Cel)  X", -0.8, 0.8, 0.0),
+            'y': p.addUserDebugParameter("Punkt B (Cel)  Y", -0.8, 0.8, 0.45),
+            'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.08, 1.0, 0.08),
         }
         self.buttons = {
             'set_cube':   p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
@@ -90,13 +94,16 @@ class RobotSimulation:
         self.btn_states = {k: 0 for k in self.buttons}
 
     def _setup_audio(self):
-        pygame.mixer.init()
+        self.motor_sound = None
+        self.motor_channel = None
         try:
+            pygame.mixer.init()
             self.motor_sound = pygame.mixer.Sound("motor.wav")
             self.motor_channel = pygame.mixer.Channel(0)
         except FileNotFoundError:
             print(" UWAGA: Brak pliku 'motor.wav'. Dźwięk nie będzie odtwarzany.")
-            self.motor_sound = None
+        except pygame.error as exc:
+            print(f" UWAGA: Audio niedostępne ({exc}). Dźwięk wyłączony.")
 
     # ------------------------------------------------------------------
     # Obsługa wejść użytkownika i Audio
@@ -119,10 +126,8 @@ class RobotSimulation:
         """Sterowanie przez suwaki IK — aktualizuje kąty tylko przy zmianie."""
         vals = [p.readUserDebugParameter(self.sliders[k]) for k in ('x', 'y', 'z')]
         if any(abs(v - pv) > 0.001 for v, pv in zip(vals, self.prev_slider_vals)):
-            ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, vals)
-            self.current_angles   = list(ik_angles)[:self.NUM_JOINTS]
+            self.current_angles   = self._solve_ik(vals)
             self.prev_slider_vals = vals
-            self._clamp_angles()
 
     def handle_keyboard(self):
         """Sterowanie klawiaturą."""
@@ -228,36 +233,59 @@ class RobotSimulation:
     # Ruch IK i chwytak dla trybu Pick & Place
     # ------------------------------------------------------------------
 
-    def move_ee_to(self, target_pos, steps: int = 150):
-        """Płynnie przesuwa końcówkę robota do zadanej pozycji XYZ.
+    def _solve_ik(self, target_pos) -> list:
+        """Wyznacza kąty stawów dla zadanej pozycji końcówki.
 
-        Wyznacza kąty stawów metodą kinematyki odwrotnej, a następnie
-        interpoluje liniowo od bieżącej pozy do docelowej, krok po kroku
-        wykonując symulację (animacja ruchu zamiast skoku).
+        W przeciwieństwie do wywołania domyślnego, przekazujemy limity
+        stawów, ich zakresy oraz bieżącą pozę jako „rest pose". Bez tego
+        solver zwracał kąty poza zakresem ruchu, przez co ramię nigdy nie
+        docierało do celu.
         """
-        ik_angles = p.calculateInverseKinematics(self.robot, self.EE_INDEX, target_pos)
-        target_angles = list(ik_angles)[:self.NUM_JOINTS]
-        for i, (lo, hi) in enumerate(JOINT_LIMITS_RAD):
-            target_angles[i] = float(np.clip(target_angles[i], lo, hi))
+        lower = [lo for lo, hi in JOINT_LIMITS_RAD]
+        upper = [hi for lo, hi in JOINT_LIMITS_RAD]
+        ranges = [hi - lo for lo, hi in JOINT_LIMITS_RAD]
+        ik_angles = p.calculateInverseKinematics(
+            self.robot, self.EE_INDEX, target_pos,
+            lowerLimits=lower, upperLimits=upper, jointRanges=ranges,
+            restPoses=list(self.current_angles),
+            maxNumIterations=300, residualThreshold=1e-5,
+        )
+        return [
+            float(np.clip(a, lo, hi))
+            for a, (lo, hi) in zip(list(ik_angles)[:self.NUM_JOINTS], JOINT_LIMITS_RAD)
+        ]
 
-        start_angles = list(self.current_angles)
-        for s in range(1, steps + 1):
-            t = s / steps
+    def move_ee_to(self, target_pos, max_steps: int = 2500, tol: float = 0.01):
+        """Przesuwa końcówkę robota do zadanej pozycji XYZ i CZEKA, aż ramię
+        faktycznie tam dotrze.
+
+        Kluczowa zmiana względem poprzedniej wersji: pętla wykonuje kroki
+        symulacji dopóki rzeczywiste kąty stawów nie zbliżą się do zadanych
+        (albo do limitu kroków), a `current_angles` aktualizujemy realnym
+        odczytem ze stawów — nie wartością „życzeniową". Dzięki temu kolejne
+        ruchy nie kumulują błędu i chwyt trafia w kostkę.
+        """
+        target_angles = self._solve_ik(target_pos)
+
+        for _ in range(max_steps):
             for i in range(self.NUM_JOINTS):
-                angle = start_angles[i] + (target_angles[i] - start_angles[i]) * t
                 p.setJointMotorControl2(
                     self.robot, i,
                     p.POSITION_CONTROL,
-                    targetPosition=angle,
-                    force=200,
-                    maxVelocity=1.5,
+                    targetPosition=target_angles[i],
+                    force=400,
+                    maxVelocity=2.0,
                 )
+            actual = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
             self._update_audio()
             p.stepSimulation()
-            time.sleep(1.0 / 240.0)
+            if self.gui:
+                time.sleep(1.0 / 240.0)
+            if max(abs(actual[i] - target_angles[i]) for i in range(self.NUM_JOINTS)) < tol:
+                break
 
-        self.current_angles = target_angles
-        self.prev_angles = list(target_angles)
+        self.current_angles = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
+        self.prev_angles = list(self.current_angles)
 
     def _auto_grab(self):
         """Chwyt kostki używany przez sekwencję Pick & Place."""
