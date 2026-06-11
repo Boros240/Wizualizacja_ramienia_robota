@@ -35,11 +35,8 @@ class RobotSimulation:
         self._setup_audio()
 
         self.controller = TeachAndPlayController(self.robot, self.EE_INDEX)
-        self.pick_and_place = PickAndPlaceController(
-            move_fn=self.move_ee_to,
-            grab_fn=self._auto_grab,
-            release_fn=self._auto_release,
-        )
+        self.ab_points = {'A': None, 'B': None}
+        self.ab_markers = {'A': None, 'B': None}
 
         self.current_angles   = [0.0] * self.NUM_JOINTS
         self.prev_angles      = [0.0] * self.NUM_JOINTS
@@ -83,13 +80,15 @@ class RobotSimulation:
             'z': p.addUserDebugParameter("Punkt B (Cel)  Z",  0.08, 1.0, 0.08),
         }
         self.buttons = {
-            'set_cube':   p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
-            'record':     p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
-            'play':       p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
-            'clear':      p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
-            'save_json':  p.addUserDebugParameter(" ZAPISZ DO JSON",        1, 0, 0),
-            'load_json':  p.addUserDebugParameter(" WCZYTAJ Z JSON",        1, 0, 0),
-            'pick_place': p.addUserDebugParameter(" WYKONAJ A->B (PICK&PLACE)", 1, 0, 0),
+            'set_cube': p.addUserDebugParameter("USTAW KOSTKE NA STARCIE",  1, 0, 0),
+            'record':   p.addUserDebugParameter(" NAGRYWAJ (START/STOP)", 1, 0, 0),
+            'play':     p.addUserDebugParameter(" ODTWORZ SEKWENCJE",     1, 0, 0),
+            'export':   p.addUserDebugParameter(" EKSPORTUJ JSON",        1, 0, 0),
+            'import':   p.addUserDebugParameter(" IMPORTUJ JSON",         1, 0, 0),
+            'save_a':   p.addUserDebugParameter(" ZAPISZ A (KOSTKA)",     1, 0, 0),
+            'save_b':   p.addUserDebugParameter(" ZAPISZ B (CEL)",        1, 0, 0),
+            'run_ab':   p.addUserDebugParameter(" WYKONAJ A -> B",        1, 0, 0),
+            'clear':    p.addUserDebugParameter(" WYCZUSC PAMIEC",        1, 0, 0),
         }
         self.btn_states = {k: 0 for k in self.buttons}
 
@@ -220,104 +219,88 @@ class RobotSimulation:
     # Narzędzia
     # ------------------------------------------------------------------
 
-    def reset_cube_position(self):
-        cx, cy, cz = [p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')]
-        p.resetBasePositionAndOrientation(self.cube, [cx, cy, cz], [0, 0, 0, 1])
-        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
+    def _current_target_position(self):
+        return [p.readUserDebugParameter(self.sliders[k]) for k in ('x', 'y', 'z')]
 
-    def _read_point(self, sliders: dict) -> list:
-        """Odczytuje pozycję XYZ z trzech suwaków."""
-        return [p.readUserDebugParameter(sliders[k]) for k in ('x', 'y', 'z')]
-
-    # ------------------------------------------------------------------
-    # Ruch IK i chwytak dla trybu Pick & Place
-    # ------------------------------------------------------------------
-
-    def _solve_ik(self, target_pos) -> list:
-        """Wyznacza kąty stawów dla zadanej pozycji końcówki.
-
-        W przeciwieństwie do wywołania domyślnego, przekazujemy limity
-        stawów, ich zakresy oraz bieżącą pozę jako „rest pose". Bez tego
-        solver zwracał kąty poza zakresem ruchu, przez co ramię nigdy nie
-        docierało do celu.
-        """
-        lower = [lo for lo, hi in JOINT_LIMITS_RAD]
-        upper = [hi for lo, hi in JOINT_LIMITS_RAD]
-        ranges = [hi - lo for lo, hi in JOINT_LIMITS_RAD]
-        ik_angles = p.calculateInverseKinematics(
-            self.robot, self.EE_INDEX, target_pos,
-            lowerLimits=lower, upperLimits=upper, jointRanges=ranges,
-            restPoses=list(self.current_angles),
-            maxNumIterations=300, residualThreshold=1e-5,
-        )
-        return [
-            float(np.clip(a, lo, hi))
-            for a, (lo, hi) in zip(list(ik_angles)[:self.NUM_JOINTS], JOINT_LIMITS_RAD)
-        ]
-
-    def move_ee_to(self, target_pos, max_steps: int = 2500, tol: float = 0.01):
-        """Przesuwa końcówkę robota do zadanej pozycji XYZ i CZEKA, aż ramię
-        faktycznie tam dotrze.
-
-        Kluczowa zmiana względem poprzedniej wersji: pętla wykonuje kroki
-        symulacji dopóki rzeczywiste kąty stawów nie zbliżą się do zadanych
-        (albo do limitu kroków), a `current_angles` aktualizujemy realnym
-        odczytem ze stawów — nie wartością „życzeniową". Dzięki temu kolejne
-        ruchy nie kumulują błędu i chwyt trafia w kostkę.
-        """
-        target_angles = self._solve_ik(target_pos)
-
-        for _ in range(max_steps):
-            for i in range(self.NUM_JOINTS):
-                p.setJointMotorControl2(
-                    self.robot, i,
-                    p.POSITION_CONTROL,
-                    targetPosition=target_angles[i],
-                    force=400,
-                    maxVelocity=2.0,
-                )
-            actual = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
-            self._update_audio()
-            p.stepSimulation()
-            if self.gui:
-                time.sleep(1.0 / 240.0)
-            if max(abs(actual[i] - target_angles[i]) for i in range(self.NUM_JOINTS)) < tol:
-                break
-
-        self.current_angles = [p.getJointState(self.robot, i)[0] for i in range(self.NUM_JOINTS)]
-        self.prev_angles = list(self.current_angles)
-
-    def _auto_grab(self):
-        """Chwyt kostki używany przez sekwencję Pick & Place."""
-        self.gripper_active = True
-        if self.constraint_id is None:
-            self._try_grab()
-
-    def _auto_release(self):
-        """Puszczenie kostki używane przez sekwencję Pick & Place."""
-        self.gripper_active = False
+    def set_cube_position(self, pos):
         if self.constraint_id is not None:
             self._release()
+        self.gripper_active = False
+        p.resetBasePositionAndOrientation(self.cube, pos, [0, 0, 0, 1])
+        p.resetBaseVelocity(self.cube, [0, 0, 0], [0, 0, 0])
 
-    def run_pick_and_place(self):
-        """Ustawia punkty A/B z suwaków i uruchamia sekwencję pobierz-i-odłóż."""
-        point_a = self._read_point(self.cube_sliders)
-        point_b = self._read_point(self.point_b_sliders)
-        self.reset_cube_position()
-        self.pick_and_place.set_points(point_a, point_b)
-        self.pick_and_place.execute()
+    def reset_cube_position(self):
+        self.set_cube_position([p.readUserDebugParameter(self.cube_sliders[k]) for k in ('x', 'y', 'z')])
 
-    def sync_state_after_play(self):
+    def prepare_cube_for_playback(self):
+        if self.controller.waypoints:
+            self.set_cube_position(self.controller.waypoints[0]["cube_pos"])
+        else:
+            self.reset_cube_position()
+
+    def sync_state_after_play(self, playback_constraint=None):
         if not self.controller.waypoints:
             return
         last = self.controller.waypoints[-1]
         self.current_angles = list(last["angles"])
         self.gripper_active  = last["gripper"]
-        if not self.gripper_active and self.constraint_id is not None:
+        if playback_constraint is not None:
+            self.constraint_id = playback_constraint
+        elif not self.gripper_active and self.constraint_id is not None:
             self._release()
         
         # Zapobiega "czknięciu" audio po synchronizacji
         self.prev_angles = list(self.current_angles)
+
+    def export_sequence(self):
+        try:
+            self.controller.export_sequence()
+        except OSError as exc:
+            print(f" Nie udalo sie wyeksportowac JSON: {exc}")
+
+    def import_sequence(self):
+        try:
+            count = self.controller.import_sequence()
+        except (OSError, ValueError) as exc:
+            print(f" Nie udalo sie zaimportowac JSON: {exc}")
+            return
+
+        if count:
+            self.prepare_cube_for_playback()
+
+    def save_ab_point(self, name):
+        if name == 'A':
+            pos = list(p.getBasePositionAndOrientation(self.cube)[0])
+        else:
+            pos = self._current_target_position()
+
+        self.ab_points[name] = pos
+        self._show_ab_marker(name, pos)
+        print(f" Zapisano punkt {name}: {[round(v, 3) for v in pos]}")
+
+    def _show_ab_marker(self, name, pos):
+        if self.ab_markers[name] is not None:
+            p.removeBody(self.ab_markers[name])
+
+        color = [0.1, 0.9, 0.1, 0.75] if name == 'A' else [0.95, 0.25, 0.1, 0.75]
+        shape = p.createVisualShape(p.GEOM_SPHERE, radius=0.045, rgbaColor=color)
+        self.ab_markers[name] = p.createMultiBody(baseMass=0, baseVisualShapeIndex=shape, basePosition=pos)
+
+    def run_ab_program(self):
+        try:
+            self.controller.build_pick_and_place_sequence(
+                self.ab_points['A'],
+                self.ab_points['B'],
+                self.NUM_JOINTS,
+                JOINT_LIMITS_RAD,
+            )
+        except ValueError as exc:
+            print(f" Nie mozna wykonac programu A -> B: {exc}")
+            return
+
+        self.set_cube_position(self.ab_points['A'])
+        playback_constraint = self.controller.play_sequence(self.cube)
+        self.sync_state_after_play(playback_constraint)
 
     # ------------------------------------------------------------------
     # Główna pętla
@@ -326,8 +309,8 @@ class RobotSimulation:
     def run(self):
         print("====== SYMULACJA ROBOTA — TRYB NAGRYWANIA ======")
         print("Klawiatura:  baza |  ramię1 | Z/X ramię2 | C/V przegub | SPACJA chwytak")
-        print("Przyciski:   NAGRYWAJ / ODTWORZ / ZAPISZ JSON / WCZYTAJ JSON")
-        print("Pick & Place: ustaw punkt A (kostka) i B (cel), naciśnij WYKONAJ A->B")
+        print("JSON: EKSPORTUJ JSON / IMPORTUJ JSON używają pliku teach_play_sequence.json")
+        print("A -> B: ustaw kostkę i zapisz A, ustaw cel suwakami i zapisz B, potem WYKONAJ A -> B")
 
         while True:
             self.tick_counter += 1
@@ -348,9 +331,24 @@ class RobotSimulation:
                 self.controller.toggle_recording()
 
             if self._check_button('play'):
-                self.reset_cube_position()
-                self.controller.play_sequence(self.cube)
-                self.sync_state_after_play()
+                self.prepare_cube_for_playback()
+                playback_constraint = self.controller.play_sequence(self.cube)
+                self.sync_state_after_play(playback_constraint)
+
+            if self._check_button('export'):
+                self.export_sequence()
+
+            if self._check_button('import'):
+                self.import_sequence()
+
+            if self._check_button('save_a'):
+                self.save_ab_point('A')
+
+            if self._check_button('save_b'):
+                self.save_ab_point('B')
+
+            if self._check_button('run_ab'):
+                self.run_ab_program()
 
             if self._check_button('clear'):
                 self.controller.clear_sequence()
